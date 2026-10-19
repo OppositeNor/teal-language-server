@@ -8,10 +8,24 @@ local lfs = require("lfs")
 local tl = require("tl")
 local logging = require("teal_language_server.logging")
 local class = require("teal_language_server.util.class")
+local rule_registry = require("teal_language_server.analysis.diagnostics.rule_registry")
+local workspace_index = require("teal_language_server.analysis.workspace_index")
 
 local logger = logging.get_logger(_module_name)
 
 local ServerState = { TealProjectConfig = {} }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -63,10 +77,21 @@ local capabilities = {
    definitionProvider = true,
    typeDefinitionProvider = true,
    completionProvider = {
-      triggerCharacters = { ".", ":" },
+      triggerCharacters = { ".", ":", "\"", "'" },
    },
    signatureHelpProvider = {
       triggerCharacters = { "(" },
+   },
+   documentSymbolProvider = true,
+   referencesProvider = true,
+   documentHighlightProvider = true,
+   workspaceSymbolProvider = true,
+   inlayHintProvider = true,
+   renameProvider = {
+      prepareProvider = true,
+   },
+   codeActionProvider = {
+      codeActionKinds = { "quickfix", "source.fixAll.teal" },
    },
 }
 
@@ -249,6 +274,65 @@ function ServerState:get_env()
    return self._env
 end
 
+function ServerState:_resolve_lint_settings()
+   local settings, warnings = rule_registry.resolve_from_config(self._config)
+   self._lint_settings = settings
+   self._config_warnings = warnings
+   if #warnings > 0 then
+      logger:warning("Lint configuration problems:\n%s", table.concat(warnings, "\n"))
+   end
+end
+
+
+
+function ServerState:absolute_path(path)
+   if path == nil or path == "" or Path(path):is_absolute() then
+      return path
+   end
+   local rel = path:gsub("^%./", "")
+   if self._teal_project_root_dir == nil then
+      return rel
+   end
+   return self._teal_project_root_dir.value .. "/" .. rel
+end
+
+
+function ServerState:get_workspace_index()
+   if self._workspace_index == nil then
+      local config = self._config or {}
+      local module_roots = {}
+      if config.source_dir then
+         table.insert(module_roots, config.source_dir)
+      end
+      for _, d in ipairs(config.include_dir or {}) do
+         table.insert(module_roots, d)
+      end
+      local skip = {}
+      if config.build_dir and config.build_dir ~= config.source_dir and config.build_dir ~= "." then
+         table.insert(skip, config.build_dir)
+      end
+      local root = self._teal_project_root_dir and self._teal_project_root_dir.value or "."
+      self._workspace_index = workspace_index.new(root, module_roots, skip)
+   end
+   return self._workspace_index
+end
+
+function ServerState:set_client_capabilities(caps)
+   self._client_capabilities = caps or {}
+end
+
+
+function ServerState:client_capability(...)
+   local node = self._client_capabilities
+   for i = 1, select("#", ...) do
+      if type(node) ~= "table" then
+         return nil
+      end
+      node = (node)[(select(i, ...))]
+   end
+   return node
+end
+
 function ServerState:initialize(root_dir)
    asserts.that(not self._has_initialized)
    self._has_initialized = true
@@ -256,8 +340,20 @@ function ServerState:initialize(root_dir)
    self._teal_project_root_dir = root_dir
    asserts.that(lfs.chdir(root_dir.value), "unable to chdir into {}", root_dir.value)
 
-   self._config = self:_load_config(root_dir)
+   local ok, result = pcall(function() return self:_load_config(root_dir) end)
+   if ok then
+      self._config = result
+   else
+
+      self._config_error = tostring(result)
+      self._config = {}
+      logger:error("Invalid tlconfig.lua, using defaults: %s", self._config_error)
+   end
+
+   self:_resolve_lint_settings()
 end
+
+
 
 class.setup(ServerState, "ServerState", {
    getters = {
@@ -276,9 +372,25 @@ class.setup(ServerState, "ServerState", {
       config = function(self)
          return self._config
       end,
+      config_error = function(self)
+         return self._config_error
+      end,
+      client_capabilities = function(self)
+         return self._client_capabilities or {}
+      end,
+      config_warnings = function(self)
+         return self._config_warnings or {}
+      end,
+      lint_settings = function(self)
+         if not self._lint_settings then
+
+            self._lint_settings = rule_registry.resolve_from_config({})
+         end
+         return self._lint_settings
+      end,
    },
    nilable_members = {
-      '_teal_project_root_dir', '_config', '_env',
+      '_teal_project_root_dir', '_config', '_config_error', '_client_capabilities', '_workspace_index', '_config_warnings', '_lint_settings', '_env',
    },
 })
 

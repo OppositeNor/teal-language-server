@@ -56,6 +56,28 @@ function DocumentManager:get(uri: Uri): Document
    return self._docs[uri.path]
 end
 
+-- Open documents whose last type check required the module in `path`.
+function DocumentManager:dependents_of(path: string): {Document}
+   local out: {Document} = {}
+   for doc_path, doc in pairs(self._docs) do
+      if doc_path ~= path then
+         for _, dep in ipairs(doc:get_dependency_files()) do
+            if dep == path then
+               table.insert(out, doc)
+               break
+            end
+         end
+      end
+   end
+   return out
+end
+
+-- Text of the open document at `path` (unsaved edits included), or nil.
+function DocumentManager:open_content(path: string): string
+   local doc = self._docs[path]
+   return doc and doc.content
+end
+
 class.setup(DocumentManager, "DocumentManager", {
    getters =  {
       docs = function(self:DocumentManager):{string:Document}

@@ -18,10 +18,18 @@ local LspReaderWriter = {}
 
 
 
+
 function LspReaderWriter:__init(stdin_reader)
    asserts.is_not_nil(stdin_reader)
    self._stdin_reader = stdin_reader
    self._disposed = false
+   self._responses_sent = 0
+end
+
+
+
+function LspReaderWriter:get_response_count()
+   return self._responses_sent
 end
 
 
@@ -132,6 +140,7 @@ function LspReaderWriter:_encode(t)
 end
 
 function LspReaderWriter:send_rpc(id, t)
+   self._responses_sent = self._responses_sent + 1
    self:_encode({
       jsonrpc = "2.0",
       id = json_nullable(id),
@@ -140,6 +149,7 @@ function LspReaderWriter:send_rpc(id, t)
 end
 
 function LspReaderWriter:send_rpc_error(id, name, msg, data)
+   self._responses_sent = self._responses_sent + 1
    self:_encode({
       jsonrpc = "2.0",
       id = json_nullable(id),

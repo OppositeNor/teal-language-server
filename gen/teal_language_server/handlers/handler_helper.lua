@@ -18,19 +18,43 @@ handler_helper.indexable_parent_types = {
    ["function_name"] = true,
 }
 
-function handler_helper.get_node_info(document_manager, params, pos)
-   local context = params.context
 
-   if context and context.triggerKind ~= lsp.completion_trigger_kind.TriggerCharacter then
-      logger:info("Ignoring completion request given kind: %s", context.triggerKind)
+
+
+function handler_helper.get_document(document_manager, params)
+   local td = params.textDocument
+   if not td then
+      return nil
+   end
+   local doc = document_manager:get(Uri.parse(td.uri))
+   if doc then
+      doc:get_problems()
+   end
+   return doc
+end
+
+
+
+
+function handler_helper.byte_position(document_manager, params)
+   local pos = params.position
+   local doc = handler_helper.get_document(document_manager, params)
+   if doc == nil then
+      return lsp.position(pos.line, pos.character)
+   end
+   return doc:to_byte_position(pos)
+end
+
+
+function handler_helper.get_node_info(document_manager, params, pos)
+   local doc = handler_helper.get_document(document_manager, params)
+
+   if not doc then
+      logger:warning("No doc found for request")
       return nil
    end
 
-   local td = params.textDocument
-   local doc = document_manager:get(Uri.parse(td.uri))
-
-   if not doc then
-      logger:warning("No doc found for completion request")
+   if pos.character < 0 then
       return nil
    end
 

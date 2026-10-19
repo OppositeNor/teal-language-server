@@ -8,6 +8,7 @@ local LspReaderWriter = require("teal_language_server.lsp.reader_writer")
 local LspEventsManager = require("teal_language_server.lsp.events_manager")
 local Path = require("teal_language_server.util.path")
 local Uri = require("teal_language_server.util.uri")
+local position = require("teal_language_server.util.position")
 local lsp = require("teal_language_server.lsp.protocol")
 local logging = require("teal_language_server.logging")
 local class = require("teal_language_server.util.class")
@@ -52,9 +53,11 @@ function DefinitionHandlers:_send_location(id, doc, file, y, x)
    end
 
    local file_uri
+   local target_doc
 
    if #file == 0 or file == doc.uri.path then
       file_uri = doc.uri
+      target_doc = doc
    else
       local full_path
 
@@ -65,13 +68,22 @@ function DefinitionHandlers:_send_location(id, doc, file, y, x)
       end
 
       file_uri = Uri.uri_from_path(Path(full_path).value)
+      target_doc = self._document_manager:get(file_uri)
+   end
+
+   local target_pos
+   if target_doc then
+      target_pos = target_doc:to_lsp_position(y, x)
+   else
+      local line_text = position.read_file_line(file_uri.path, y - 1)
+      target_pos = lsp.position(y - 1, position.byte_to_utf16(line_text, x - 1))
    end
 
    self._lsp_reader_writer:send_rpc(id, {
       uri = Uri.tostring(file_uri),
       range = {
-         start = lsp.position(y - 1, x - 1),
-         ["end"] = lsp.position(y - 1, x - 1),
+         start = target_pos,
+         ["end"] = target_pos,
       },
    })
    return true
@@ -83,7 +95,7 @@ end
 
 
 function DefinitionHandlers:_on_definition(params, id)
-   local pos = params.position
+   local pos = handler_helper.byte_position(self._document_manager, params)
    local node_info, doc = handler_helper.get_node_info(self._document_manager, params, pos)
    if node_info == nil then
       self._lsp_reader_writer:send_rpc(id, nil)
@@ -137,7 +149,7 @@ end
 
 
 function DefinitionHandlers:_on_type_definition(params, id)
-   local pos = params.position
+   local pos = handler_helper.byte_position(self._document_manager, params)
    local node_info, doc = handler_helper.get_node_info(self._document_manager, params, pos)
    if node_info == nil then
       self._lsp_reader_writer:send_rpc(id, nil)

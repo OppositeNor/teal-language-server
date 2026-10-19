@@ -19,6 +19,7 @@ local record lsp
       "serverErrorStart"
 
       "RequestCancelled"
+      "RequestFailed"
    end
 
    error_code: {ErrorName:integer}
@@ -73,7 +74,17 @@ local record lsp
       range: Range
       severity: integer
       message: string
+      code: string
+      source: string
+      tags: {integer}
+      data: {string:any}
    end
+
+   enum DiagnosticTag
+      "Unnecessary"
+      "Deprecated"
+   end
+   diagnostic_tag: {DiagnosticTag:integer}
 
    record Method
       enum Name
@@ -89,6 +100,16 @@ local record lsp
          "textDocument/publishDiagnostics"
          "textDocument/completion"
          "textDocument/signatureHelp"
+         "textDocument/codeAction"
+         "textDocument/documentSymbol"
+         "textDocument/references"
+         "textDocument/documentHighlight"
+         "textDocument/prepareRename"
+         "textDocument/rename"
+         "workspace/symbol"
+         "teal/serverStats"
+         "textDocument/inlayHint"
+         "window/showMessage"
          "shutdown"
       end
 
@@ -152,6 +173,14 @@ local record lsp
    completion_item_kind: {CompletionItemKind:integer}
    typecodes_to_kind: {integer:integer}
 
+   enum MessageType
+      "Error"
+      "Warning"
+      "Info"
+      "Log"
+   end
+   message_type: {MessageType:integer}
+
    record CompletionContext
       triggerKind: integer
       triggerCharacter: string
@@ -171,6 +200,7 @@ lsp.error_code = {
 	serverErrorStart = -32099,
 
 	RequestCancelled = -32800,
+	RequestFailed = -32803,
 }
 
 lsp.severity = {
@@ -178,6 +208,18 @@ lsp.severity = {
    Warning = 2,
    Information = 3,
    Hint = 4,
+}
+
+lsp.diagnostic_tag = {
+   Unnecessary = 1,
+   Deprecated = 2,
+}
+
+lsp.message_type = {
+   Error = 1,
+   Warning = 2,
+   Info = 3,
+   Log = 4,
 }
 
 lsp.sync_kind = {

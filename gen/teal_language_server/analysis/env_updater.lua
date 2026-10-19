@@ -2,6 +2,7 @@ local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 th
 
 
 local DocumentManager = require("teal_language_server.analysis.document_manager")
+local Document = require("teal_language_server.analysis.document")
 local lua_env = require("teal_language_server.analysis.lua_env")
 local lusc = require("lusc")
 local ServerState = require("teal_language_server.server_state")
@@ -30,7 +31,32 @@ local function dedup_path(path_str)
    return table.concat(result, ";")
 end
 
+
+
+local StringFile = {}
+
+
+
+function StringFile:read(_fmt)
+   local c = self.content
+   self.content = nil
+   return c
+end
+
+function StringFile:close()
+   return true
+end
+
 local EnvUpdater = {}
+
+
+
+
+
+
+
+
+
 
 
 
@@ -43,6 +69,9 @@ function EnvUpdater:__init(server_state, root_nursery, document_manager)
    asserts.is_not_nil(document_manager)
 
    self._change_detected = lusc.new_sticky_event()
+   self._pending_analysis = {}
+   self._type_baseline = 0
+   self._env_rebuilds = 0
    self._server_state = server_state
    self._root_nursery = root_nursery
    self._document_manager = document_manager
@@ -162,11 +191,118 @@ function EnvUpdater:_update_env_on_changes()
          doc:clear_cache()
          doc:process_and_publish_results()
       end
+      self._type_baseline = self:type_count()
+      self._env_rebuilds = self._env_rebuilds + 1
    end
+end
+
+
+function EnvUpdater:_setting(name, default)
+   local externals = (self._server_state.config or {}).externals
+   local ours = externals and (externals).teal_language_server
+   local value = type(ours) == "table" and (ours)[name]
+   if type(value) == "number" and value >= 0 then
+      return value
+   end
+   return default
+end
+
+
+
+function EnvUpdater:type_count()
+   local env = self._server_state:get_env()
+   if env == nil or env.reporter == nil then
+      return 0
+   end
+   return env.reporter.next_num
+end
+
+function EnvUpdater:get_stats()
+   local env = self._server_state:get_env()
+   return {
+      typeCount = self:type_count(),
+      typeBaseline = self._type_baseline,
+      loadedOrder = env and #env.loaded_order or 0,
+      envRebuilds = self._env_rebuilds,
+   }
+end
+
+
+
+function EnvUpdater:_check_type_report_growth()
+   local limit = self:_setting("type_report_limit", 50000)
+   local growth = self:type_count() - self._type_baseline
+   if growth > limit then
+      logger:info("Type report grew by %d entries (limit %d); scheduling env rebuild", growth, limit)
+      self:schedule_env_update()
+   end
+end
+
+
+
+function EnvUpdater:refresh_dependents(path)
+   if #self._document_manager:dependents_of(path) > 0 then
+      logger:debug("%s has dependents among open documents - enqueuing env update", path)
+      self:schedule_env_update()
+   end
+end
+
+
+function EnvUpdater:analyze_now(doc)
+   self._pending_analysis[doc.uri.path] = nil
+   doc:process_and_publish_results()
+   self:refresh_dependents(doc.uri.path)
+   self:_check_type_report_growth()
+end
+
+
+
+
+function EnvUpdater:schedule_analysis(doc)
+   local path = doc.uri.path
+   local version = doc.version
+   self._pending_analysis[path] = version
+   local delay = self:_setting("diagnostics_delay_ms", 150) / 1000
+   self._root_nursery:start_soon(function()
+      if delay > 0 then
+         lusc.await_sleep(delay)
+      end
+      if self._pending_analysis[path] ~= version then
+
+         return
+      end
+      local current = self._document_manager.docs[path]
+      if current == nil or current.version ~= version then
+         self._pending_analysis[path] = nil
+         return
+      end
+      self:analyze_now(current)
+   end)
 end
 
 function EnvUpdater:schedule_env_update()
    self._change_detected:set()
+end
+
+
+
+
+function EnvUpdater:_install_open_document_overlay()
+   local original = tl.search_module
+   tl.search_module = function(module_name, search_all)
+      local found, fd, tried = original(module_name, search_all)
+      if found then
+         local content = self._document_manager:open_content(self._server_state:absolute_path(found))
+         if content then
+            if fd then
+               fd:close()
+            end
+            logger:debug("Resolved module %s to open document %s", module_name, found)
+            return found, (setmetatable({ content = content }, { __index = StringFile })), tried
+         end
+      end
+      return found, fd, tried
+   end
 end
 
 function EnvUpdater:initialize()
@@ -184,8 +320,11 @@ function EnvUpdater:initialize()
       logger:info("Discovered user lua cpath: %s", discovered_user_cpath)
    end
 
+   self:_install_open_document_overlay()
+
    local env = self:_generate_env()
    self._server_state:set_env(env)
+   self._type_baseline = self:type_count()
 
    self._root_nursery:start_soon(function()
       self:_update_env_on_changes()

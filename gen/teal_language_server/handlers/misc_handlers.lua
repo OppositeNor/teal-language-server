@@ -1,8 +1,10 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local math = _tl_compat and _tl_compat.math or math; local string = _tl_compat and _tl_compat.string or string; local _module_name = "handlers.misc_handlers"
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local math = _tl_compat and _tl_compat.math or math; local pairs = _tl_compat and _tl_compat.pairs or pairs; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.misc_handlers"
 
 local DocumentSyncHandlers = require("teal_language_server.handlers.document_sync")
 local LanguageFeatureHandlers = require("teal_language_server.handlers.language_features")
 local DefinitionHandlers = require("teal_language_server.handlers.definitions")
+local CodeActionHandlers = require("teal_language_server.handlers.code_actions")
+local NavigationHandlers = require("teal_language_server.handlers.navigation")
 local EnvUpdater = require("teal_language_server.analysis.env_updater")
 local args_parser = require("teal_language_server.args_parser")
 local DocumentManager = require("teal_language_server.analysis.document_manager")
@@ -69,6 +71,10 @@ function MiscHandlers:_on_initialize(params, id)
 
    logger:info("Received initialize request from client. Teal project dir: %s", root_path.value)
 
+   if type(params.capabilities) == "table" then
+      self._server_state:set_client_capabilities(params.capabilities)
+   end
+
    self._server_state:initialize(root_path)
    self._env_updater:initialize()
 
@@ -81,10 +87,38 @@ function MiscHandlers:_on_initialize(params, id)
          version = self._server_state.version,
       },
    })
+
+   local config_error = self._server_state.config_error
+   if config_error then
+      self._lsp_reader_writer:send_rpc_notification("window/showMessage", {
+         type = lsp.message_type.Error,
+         message = "teal-language-server: invalid tlconfig.lua, using default settings.\n" .. config_error,
+      })
+   end
+
+   local config_warnings = self._server_state.config_warnings
+   if #config_warnings > 0 then
+      self._lsp_reader_writer:send_rpc_notification("window/showMessage", {
+         type = lsp.message_type.Warning,
+         message = "teal-language-server: problems in tlconfig.lua lint settings:\n" .. table.concat(config_warnings, "\n"),
+      })
+   end
 end
 
 function MiscHandlers:_on_initialized()
    logger:debug("Received 'initialized' notification")
+end
+
+
+
+function MiscHandlers:_on_server_stats(_params, id)
+   local stats = self._env_updater:get_stats()
+   local count = 0
+   for _ in pairs(self._document_manager.docs) do
+      count = count + 1
+   end
+   stats.openDocuments = count
+   self._lsp_reader_writer:send_rpc(id, stats)
 end
 
 function MiscHandlers:_add_handler(name, handler)
@@ -94,10 +128,13 @@ end
 function MiscHandlers:initialize()
    self:_add_handler("initialize", self._on_initialize)
    self:_add_handler("initialized", self._on_initialized)
+   self:_add_handler("teal/serverStats", self._on_server_stats)
 
    DocumentSyncHandlers(self._lsp_events_manager, self._document_manager, self._env_updater):initialize()
-   LanguageFeatureHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._document_manager):initialize()
+   LanguageFeatureHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._document_manager, self._server_state):initialize()
    DefinitionHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager):initialize()
+   CodeActionHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager):initialize()
+   NavigationHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager):initialize()
 end
 
 class.setup(MiscHandlers, "MiscHandlers", {})

@@ -8,6 +8,8 @@ local lfs <const> = require("lfs")
 local tl <const> = require("tl")
 local logging <const> = require("teal_language_server.logging")
 local class <const> = require("teal_language_server.util.class")
+local rule_registry <const> = require("teal_language_server.analysis.diagnostics.rule_registry")
+local workspace_index <const> = require("teal_language_server.analysis.workspace_index")
 
 local logger = logging.get_logger(_module_name)
 
@@ -33,14 +35,26 @@ local record ServerState
    end
 
    capabilities:{string:any}
+   -- the `capabilities` object the client sent with `initialize`
+   client_capabilities: {string:any}
    name: string
    version: string
    config: TealProjectConfig
+   -- set when tlconfig.lua failed to load or validate; defaults are used instead
+   config_error: string
+   -- non-fatal problems found in the lint configuration
+   config_warnings: {string}
+   lint_settings: rule_registry.Settings
    teal_project_root_dir: Path
 
    _has_initialized: boolean
    _teal_project_root_dir: Path
    _config: TealProjectConfig
+   _config_error: string
+   _client_capabilities: {string:any}
+   _workspace_index: workspace_index.Index
+   _config_warnings: {string}
+   _lint_settings: rule_registry.Settings
    _env: tl.Env
 
    metamethod __call: function(self: ServerState): ServerState
@@ -63,11 +77,22 @@ local capabilities = {
    definitionProvider = true,
    typeDefinitionProvider = true,
    completionProvider = {
-      triggerCharacters = { ".", ":" },
+      triggerCharacters = { ".", ":", "\"", "'" },
    },
    signatureHelpProvider = {
       triggerCharacters = { "(" }
-   }
+   },
+   documentSymbolProvider = true,
+   referencesProvider = true,
+   documentHighlightProvider = true,
+   workspaceSymbolProvider = true,
+   inlayHintProvider = true,
+   renameProvider = {
+      prepareProvider = true,
+   },
+   codeActionProvider = {
+      codeActionKinds = { "quickfix", "source.fixAll.teal" },
+   },
 }
 
 function ServerState:_validate_config(c:ServerState.TealProjectConfig)
@@ -249,6 +274,65 @@ function ServerState:get_env(): tl.Env
    return self._env
 end
 
+function ServerState:_resolve_lint_settings()
+   local settings, warnings = rule_registry.resolve_from_config(self._config as {string:any})
+   self._lint_settings = settings
+   self._config_warnings = warnings
+   if #warnings > 0 then
+      logger:warning("Lint configuration problems:\n%s", table.concat(warnings, "\n"))
+   end
+end
+
+-- Absolute form of a file name as recorded by tl (modules found through
+-- package.path are recorded relative to the project root, the server's cwd).
+function ServerState:absolute_path(path: string): string
+   if path == nil or path == "" or Path(path):is_absolute() then
+      return path
+   end
+   local rel = path:gsub("^%./", "")
+   if self._teal_project_root_dir == nil then
+      return rel
+   end
+   return self._teal_project_root_dir.value .. "/" .. rel
+end
+
+-- The project's file index (created on first use from tlconfig.lua).
+function ServerState:get_workspace_index(): workspace_index.Index
+   if self._workspace_index == nil then
+      local config = self._config or {}
+      local module_roots: {string} = {}
+      if config.source_dir then
+         table.insert(module_roots, config.source_dir)
+      end
+      for _, d in ipairs(config.include_dir or {}) do
+         table.insert(module_roots, d)
+      end
+      local skip: {string} = {}
+      if config.build_dir and config.build_dir ~= config.source_dir and config.build_dir ~= "." then
+         table.insert(skip, config.build_dir)
+      end
+      local root = self._teal_project_root_dir and self._teal_project_root_dir.value or "."
+      self._workspace_index = workspace_index.new(root, module_roots, skip)
+   end
+   return self._workspace_index
+end
+
+function ServerState:set_client_capabilities(caps: {string:any})
+   self._client_capabilities = caps or {}
+end
+
+-- Looks up a nested client capability, e.g. client_capability("workspace", "workspaceEdit", "documentChanges")
+function ServerState:client_capability(...: string): any
+   local node: any = self._client_capabilities
+   for i = 1, select("#", ...) do
+      if type(node) ~= "table" then
+         return nil
+      end
+      node = (node as {string:any})[(select(i, ...))]
+   end
+   return node
+end
+
 function ServerState:initialize(root_dir:Path)
    asserts.that(not self._has_initialized)
    self._has_initialized = true
@@ -256,8 +340,20 @@ function ServerState:initialize(root_dir:Path)
    self._teal_project_root_dir = root_dir
    asserts.that(lfs.chdir(root_dir.value), "unable to chdir into {}", root_dir.value)
 
-   self._config = self:_load_config(root_dir)
+   local ok, result = pcall(function(): ServerState.TealProjectConfig return self:_load_config(root_dir) end)
+   if ok then
+      self._config = result as ServerState.TealProjectConfig
+   else
+      -- keep the server usable with default settings rather than failing initialize
+      self._config_error = tostring(result)
+      self._config = {} as ServerState.TealProjectConfig
+      logger:error("Invalid tlconfig.lua, using defaults: %s", self._config_error)
+   end
+
+   self:_resolve_lint_settings()
 end
+
+
 
 class.setup(ServerState, "ServerState", {
    getters = {
@@ -276,9 +372,25 @@ class.setup(ServerState, "ServerState", {
       config = function(self:ServerState):ServerState.TealProjectConfig
          return self._config
       end,
+      config_error = function(self:ServerState):string
+         return self._config_error
+      end,
+      client_capabilities = function(self:ServerState):{string:any}
+         return self._client_capabilities or {}
+      end,
+      config_warnings = function(self:ServerState):{string}
+         return self._config_warnings or {}
+      end,
+      lint_settings = function(self:ServerState):rule_registry.Settings
+         if not self._lint_settings then
+            -- documents analyzed before initialize (or in tests) get defaults
+            self._lint_settings = rule_registry.resolve_from_config({})
+         end
+         return self._lint_settings
+      end,
    },
    nilable_members = {
-      '_teal_project_root_dir', '_config', '_env'
+      '_teal_project_root_dir', '_config', '_config_error', '_client_capabilities', '_workspace_index', '_config_warnings', '_lint_settings', '_env'
    }
 })
 

@@ -24,11 +24,12 @@ function DocumentSyncHandlers:__init(lsp_events_manager, document_manager, env_u
    self._env_updater = env_updater
 end
 
+
 function DocumentSyncHandlers:_on_did_open(params)
    local td = params.textDocument
    local uri = Uri.parse(td.uri)
    if uri then
-      self._document_manager:open(uri, td.text, td.version):process_and_publish_results()
+      self._env_updater:analyze_now(self._document_manager:open(uri, td.text, td.version))
    else
       logger:error("Invalid URI, unable to open document: %s", td.uri)
    end
@@ -36,7 +37,12 @@ end
 
 function DocumentSyncHandlers:_on_did_close(params)
    local td = params.textDocument
-   self._document_manager:close(Uri.parse(td.uri))
+   local uri = Uri.parse(td.uri)
+   self._document_manager:close(uri)
+
+   if uri then
+      self._env_updater:refresh_dependents(uri.path)
+   end
 end
 
 function DocumentSyncHandlers:_on_did_save(params)
@@ -66,9 +72,10 @@ function DocumentSyncHandlers:_on_did_change(params)
    local changes = params.contentChanges
    if changes and changes[1] and changes[1].text then
       doc:update_text(changes[1].text, td.version)
-      doc:process_and_publish_results()
+      self._env_updater:schedule_analysis(doc)
    end
 end
+
 
 function DocumentSyncHandlers:initialize()
    self._lsp_events_manager:set_handler("textDocument/didOpen", function(params, _id) self:_on_did_open(params) end)

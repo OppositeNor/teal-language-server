@@ -543,11 +543,18 @@ local record tl
       "$EOF$"
    end
 
+   record Comment
+      x: integer
+      y: integer
+      text: string
+   end
+
    record Token
       x: integer
       y: integer
       tk: string
       kind: TokenKind
+      comments: {Comment}
    end
 
    -----------------------------------------------------------------------------

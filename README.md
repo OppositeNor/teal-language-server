@@ -6,10 +6,17 @@ A language server for the [Teal language](https://github.com/teal-language/tl)
 
 ## Features
 
-* Go to definition (`textDocument/definition`)
-* Linting (`textDocument/publishDiagnostics`)
-* Intellisense (`textDocument/completion`)
+* Diagnostics (`textDocument/publishDiagnostics`): compiler errors and warnings plus lint rules, with rule codes, configurable severities and suppression comments (see [Configuration](#configuration))
+* Completion (`textDocument/completion`): scope symbols and keywords, record fields and `:` methods with type details and signatures (snippet placeholders when the editor supports them), `require("...")` module names
 * Hover (`textDocument/hover`)
+* Signature help (`textDocument/signatureHelp`), with the active parameter highlighted anywhere in the call
+* Go to definition / type definition (`textDocument/definition`, `textDocument/typeDefinition`)
+* Find references and document highlight (`textDocument/references`, `textDocument/documentHighlight`): locals, globals, and record fields and methods across open files
+* Rename (`textDocument/prepareRename`, `textDocument/rename`)
+* Code actions (`textDocument/codeAction`): quick fixes (remove unused import, prefix unused variable with `_`, annotate an implicit `any`, disable a rule for a line) and "Fix all" (`source.fixAll.teal`)
+* Document outline (`textDocument/documentSymbol`) and workspace symbol search (`workspace/symbol`)
+* Inlay hints (`textDocument/inlayHint`) showing inferred types of unannotated locals
+* Unsaved edits to a module are visible to the files that `require` it
 
 ## Installation
 
@@ -73,6 +80,70 @@ Note:
 * All args are optional
 * By default, logging is 'none' which disables logging completely
 * When logging is set to `by_proj_path` or `by_date`, the log is output to `[User Home Directory]/.cache/teal-language-server`
+
+## Configuration
+
+The server reads `tlconfig.lua` from the workspace root: the same file `tl` and `cyan` use (`include_dir`, `source_dir`, `global_env_def`, `gen_target`, `disable_warnings`, `warning_error`, ...). Server-specific settings go in the `externals` table, which `tl` reserves for other tools:
+
+```lua
+return {
+   include_dir = { "types" },
+   externals = {
+      teal_language_server = {
+         rules = {
+            ["unreachable-code"] = "error",                    -- "off" | "warn" | "error" (or 0 | 1 | 2)
+            ["implicit-any"] = { "warn", { ignore_pattern = "^_" } },
+            ["self-assignment"] = "warn",
+            ["tl/unused"] = "off",                             -- compiler warning kinds, too
+         },
+         report_unused_directives = "warn",  -- flag suppression comments that suppress nothing
+         inlay_hints = true,
+         diagnostics_delay_ms = 150,         -- debounce for diagnostics after edits
+      },
+   },
+}
+```
+
+An invalid `tlconfig.lua`, an unknown rule, or a bad severity is reported in the editor; the server keeps working with defaults.
+
+### Lint rules
+
+| Rule | Default | Reports |
+|---|---|---|
+| `unreachable-code` | warn | statements after `break`, `goto`, or a `do ... end` that returns |
+| `self-assignment` | warn | `x = x`, `t.a = t["a"]` |
+| `implicit-any` | warn | function parameters without a type annotation (they are `any` in Teal); options `check_lua` (default `false`) and `ignore_pattern` (default `"^_"`) |
+| `tl/<kind>` | warn | the compiler's own warnings (`tl/unused`, `tl/redeclaration`, `tl/branch`, ...) |
+
+Compiler type and syntax errors are reported as `tl/type-error` and `tl/syntax-error`.
+
+### Suppression comments
+
+```lua
+-- tls-disable-next-line implicit-any -- signature is dictated by the caller
+local function on_event(e) end
+local x = 1 -- tls-disable-line tl/unused
+
+-- tls-disable unreachable-code
+...
+-- tls-enable unreachable-code
+```
+
+Without a rule list, a directive applies to every rule.
+
+### APIs implemented outside Teal
+
+Describe APIs implemented outside Teal (C modules, host applications embedding Lua) in a `.d.tl` declaration file. Put it on `include_dir`, or use `global_env_def` for APIs injected as globals. Completion, signature help, type checking and navigation then work as they do for Teal modules.
+
+## Development
+
+```
+luarocks make --tree=luarocks_tree   # build + install
+cyan build                           # type check and regenerate gen/
+tested -n 0 tests/                   # run the test suite (tested 0.3.x)
+```
+
+Design notes: `docs/engineering/language-server-gap-analysis.md` and `docs/engineering/language-server-roadmap.md`.
 
 ## Licences
 Alongside packages defined in the rockspec, teal-language-server includes the source of the following:

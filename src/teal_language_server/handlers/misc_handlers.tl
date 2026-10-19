@@ -3,6 +3,8 @@ local _module_name = "handlers.misc_handlers"
 local DocumentSyncHandlers <const> = require("teal_language_server.handlers.document_sync")
 local LanguageFeatureHandlers <const> = require("teal_language_server.handlers.language_features")
 local DefinitionHandlers <const> = require("teal_language_server.handlers.definitions")
+local CodeActionHandlers <const> = require("teal_language_server.handlers.code_actions")
+local NavigationHandlers <const> = require("teal_language_server.handlers.navigation")
 local EnvUpdater <const> = require("teal_language_server.analysis.env_updater")
 local args_parser <const> = require("teal_language_server.args_parser")
 local DocumentManager <const> = require("teal_language_server.analysis.document_manager")
@@ -69,6 +71,10 @@ function MiscHandlers:_on_initialize(params:lsp.Method.Params, id:integer):nil
 
    logger:info("Received initialize request from client. Teal project dir: %s", root_path.value)
 
+   if type(params.capabilities) == "table" then
+      self._server_state:set_client_capabilities(params.capabilities as {string:any})
+   end
+
    self._server_state:initialize(root_path)
    self._env_updater:initialize()
 
@@ -81,10 +87,38 @@ function MiscHandlers:_on_initialize(params:lsp.Method.Params, id:integer):nil
          version = self._server_state.version,
       },
    })
+
+   local config_error = self._server_state.config_error
+   if config_error then
+      self._lsp_reader_writer:send_rpc_notification("window/showMessage", {
+         type = lsp.message_type.Error,
+         message = "teal-language-server: invalid tlconfig.lua, using default settings.\n" .. config_error,
+      } as lsp.Method.Params)
+   end
+
+   local config_warnings = self._server_state.config_warnings
+   if #config_warnings > 0 then
+      self._lsp_reader_writer:send_rpc_notification("window/showMessage", {
+         type = lsp.message_type.Warning,
+         message = "teal-language-server: problems in tlconfig.lua lint settings:\n" .. table.concat(config_warnings, "\n"),
+      } as lsp.Method.Params)
+   end
 end
 
 function MiscHandlers:_on_initialized():nil
    logger:debug("Received 'initialized' notification")
+end
+
+-- Server-specific request reporting internal sizes (used by tests and for
+-- diagnosing memory growth).
+function MiscHandlers:_on_server_stats(_params:lsp.Method.Params, id:integer):nil
+   local stats = self._env_updater:get_stats()
+   local count = 0
+   for _ in pairs(self._document_manager.docs) do
+      count = count + 1
+   end
+   stats.openDocuments = count
+   self._lsp_reader_writer:send_rpc(id, stats)
 end
 
 function MiscHandlers:_add_handler(name:lsp.Method.Name, handler:function(MiscHandlers, lsp.Method.Params, integer):nil)
@@ -94,10 +128,13 @@ end
 function MiscHandlers:initialize()
    self:_add_handler("initialize", self._on_initialize)
    self:_add_handler("initialized", self._on_initialized)
+   self:_add_handler("teal/serverStats", self._on_server_stats)
 
    DocumentSyncHandlers(self._lsp_events_manager, self._document_manager, self._env_updater):initialize()
-   LanguageFeatureHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._document_manager):initialize()
+   LanguageFeatureHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._document_manager, self._server_state):initialize()
    DefinitionHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager):initialize()
+   CodeActionHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager):initialize()
+   NavigationHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager):initialize()
 end
 
 class.setup(MiscHandlers, "MiscHandlers", {

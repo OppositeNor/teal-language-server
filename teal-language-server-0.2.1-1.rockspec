@@ -25,7 +25,7 @@ dependencies = {
    "ltreesitter == 0.3.0",
 }
 
-test_dependencies = { "tested >= 0.3.0", "luacov", "inspect" }
+test_dependencies = { "tested >= 0.3.0, < 0.4.0", "luacov", "inspect" }
 
 test = {
    type = "tested",
@@ -50,7 +50,29 @@ build = {
       ["teal_language_server.analysis.env_updater"] = "gen/teal_language_server/analysis/env_updater.lua",
       ["teal_language_server.analysis.lua_env"] = "gen/teal_language_server/analysis/lua_env.lua",
 
+      ["teal_language_server.analysis.symbols"] = "gen/teal_language_server/analysis/symbols.lua",
+      ["teal_language_server.analysis.references"] = "gen/teal_language_server/analysis/references.lua",
+      ["teal_language_server.analysis.inlay_hints"] = "gen/teal_language_server/analysis/inlay_hints.lua",
+      ["teal_language_server.analysis.workspace_index"] = "gen/teal_language_server/analysis/workspace_index.lua",
+
+      -- diagnostics engine and lint rules
+      ["teal_language_server.analysis.diagnostics.problem"] = "gen/teal_language_server/analysis/diagnostics/problem.lua",
+      ["teal_language_server.analysis.diagnostics.ast_walk"] = "gen/teal_language_server/analysis/diagnostics/ast_walk.lua",
+      ["teal_language_server.analysis.diagnostics.rule"] = "gen/teal_language_server/analysis/diagnostics/rule.lua",
+      ["teal_language_server.analysis.diagnostics.rule_registry"] = "gen/teal_language_server/analysis/diagnostics/rule_registry.lua",
+      ["teal_language_server.analysis.diagnostics.directives"] = "gen/teal_language_server/analysis/diagnostics/directives.lua",
+      ["teal_language_server.analysis.diagnostics.fixer"] = "gen/teal_language_server/analysis/diagnostics/fixer.lua",
+      ["teal_language_server.analysis.diagnostics.engine"] = "gen/teal_language_server/analysis/diagnostics/engine.lua",
+      ["teal_language_server.analysis.diagnostics.linter"] = "gen/teal_language_server/analysis/diagnostics/linter.lua",
+      ["teal_language_server.analysis.diagnostics.compiler_fixes"] = "gen/teal_language_server/analysis/diagnostics/compiler_fixes.lua",
+      ["teal_language_server.analysis.diagnostics.rule_tester"] = "gen/teal_language_server/analysis/diagnostics/rule_tester.lua",
+      ["teal_language_server.analysis.diagnostics.rules.unreachable_code"] = "gen/teal_language_server/analysis/diagnostics/rules/unreachable_code.lua",
+      ["teal_language_server.analysis.diagnostics.rules.self_assignment"] = "gen/teal_language_server/analysis/diagnostics/rules/self_assignment.lua",
+      ["teal_language_server.analysis.diagnostics.rules.implicit_any"] = "gen/teal_language_server/analysis/diagnostics/rules/implicit_any.lua",
+
       -- handler
+      ["teal_language_server.handlers.navigation"] = "gen/teal_language_server/handlers/navigation.lua",
+      ["teal_language_server.handlers.code_actions"] = "gen/teal_language_server/handlers/code_actions.lua",
       ["teal_language_server.handlers.definitions"] = "gen/teal_language_server/handlers/definitions.lua",
       ["teal_language_server.handlers.handler_helper"] = "gen/teal_language_server/handlers/handler_helper.lua",
       ["teal_language_server.handlers.document_sync"] = "gen/teal_language_server/handlers/document_sync.lua",
@@ -69,6 +91,7 @@ build = {
       ["teal_language_server.util.class"] = "gen/teal_language_server/util/class.lua",
       ["teal_language_server.util.path"] = "gen/teal_language_server/util/path.lua",
       ["teal_language_server.util.uri"] = "gen/teal_language_server/util/uri.lua",
+      ["teal_language_server.util.position"] = "gen/teal_language_server/util/position.lua",
       ["teal_language_server.util.util"] = "gen/teal_language_server/util/util.lua",
    },
    install = {

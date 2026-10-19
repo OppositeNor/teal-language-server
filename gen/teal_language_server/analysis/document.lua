@@ -1,4 +1,4 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local pairs = _tl_compat and _tl_compat.pairs or pairs; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "analysis.document"
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local io = _tl_compat and _tl_compat.io or io; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local math = _tl_compat and _tl_compat.math or math; local pairs = _tl_compat and _tl_compat.pairs or pairs; local pcall = _tl_compat and _tl_compat.pcall or pcall; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "analysis.document"
 
 local ServerState = require("teal_language_server.server_state")
 local Uri = require("teal_language_server.util.uri")
@@ -8,6 +8,13 @@ local class = require("teal_language_server.util.class")
 local asserts = require("teal_language_server.util.asserts")
 local logging = require("teal_language_server.logging")
 local json = require("cjson")
+local position = require("teal_language_server.util.position")
+local engine = require("teal_language_server.analysis.diagnostics.engine")
+local problem = require("teal_language_server.analysis.diagnostics.problem")
+local fixer = require("teal_language_server.analysis.diagnostics.fixer")
+local linter = require("teal_language_server.analysis.diagnostics.linter")
+local doc_symbols = require("teal_language_server.analysis.symbols")
+local ast_walk = require("teal_language_server.analysis.diagnostics.ast_walk")
 
 local logger = logging.get_logger(_module_name)
 
@@ -16,6 +23,10 @@ local teal_language = ltreesitter.require("teal", "teal")
 local teal_parser = teal_language:parser()
 
 local tl = require("tl")
+local lfs = require("lfs")
+
+
+
 
 
 
@@ -78,6 +89,13 @@ local Document = { NodeInfo = {} }
 
 
 
+
+
+
+
+
+
+
 function Document:__init(uri, content, version, lsp_reader_writer, server_state)
    asserts.is_not_nil(lsp_reader_writer)
    asserts.is_not_nil(server_state)
@@ -90,26 +108,6 @@ function Document:__init(uri, content, version, lsp_reader_writer, server_state)
    self._server_state = server_state
    self._tree = teal_parser:parse_string(self._content)
    self._tree_cursor = self._tree:root():create_cursor()
-end
-
-
-
-local function set(lst)
-   local s = {}
-   for _, v in ipairs(lst) do
-      s[v] = true
-   end
-   return s
-end
-
-
-local function filter(t, pred)
-   local pass = {}
-   local fail = {}
-   for _, v in ipairs(t) do
-      table.insert(pred(v) and pass or fail, v)
-   end
-   return pass, fail
 end
 
 local function is_lua(fname)
@@ -178,14 +176,135 @@ function Document:get_ast_node_at(type_info)
    return _get_node_at(loaded_file.ast, type_info.y, type_info.x)
 end
 
+
+local declaration_tokens = {}
+local declaration_mtimes = {}
+
+function Document:_tokens_of_file(file)
+   if file == "" or file == self._uri.path then
+      return (self:_get_tokens())
+   end
+   local path = self._server_state:absolute_path(file)
+   local mtime = lfs.attributes(path, "modification")
+   if mtime == nil then
+      return nil
+   end
+   if declaration_mtimes[path] ~= mtime then
+      local fd = io.open(path, "rb")
+      if not fd then
+         return nil
+      end
+      local text = fd:read("*a")
+      fd:close()
+      declaration_tokens[path] = tl.lex(text, path)
+      declaration_mtimes[path] = mtime
+   end
+   return declaration_tokens[path]
+end
+
+
+
+
+
+
+function Document:_function_type_arg_names(type_info)
+   if type_info.y == nil or type_info.x == nil or type_info.file == nil then
+      return nil
+   end
+   local tokens = self:_tokens_of_file(type_info.file)
+   if tokens == nil then
+      return nil
+   end
+   local idx = ast_walk.token_index_at(tokens, type_info.y, type_info.x)
+   local tok = tokens[idx]
+   if not (tok and tok.tk == "function" and tok.y == type_info.y and tok.x == type_info.x) then
+      return nil
+   end
+
+   local i = idx + 1
+   if tokens[i] and tokens[i].tk == "<" then
+      while tokens[i] and tokens[i].tk ~= ">" do i = i + 1 end
+      i = i + 1
+   end
+   if not (tokens[i] and tokens[i].tk == "(") then
+      return nil
+   end
+   local names = {}
+   local any_named = false
+   local depth = 0
+   local segment_start = true
+   i = i + 1
+   while tokens[i] do
+      local t = tokens[i]
+      if t.tk == "(" or t.tk == "{" or t.tk == "<" then
+         depth = depth + 1
+      elseif t.tk == ")" or t.tk == "}" or t.tk == ">" then
+         if depth == 0 then
+            break
+         end
+         depth = depth - 1
+      elseif t.tk == "," and depth == 0 then
+         segment_start = true
+      elseif segment_start and depth == 0 then
+         segment_start = false
+         local nxt = tokens[i + 1]
+         if t.tk == "self" or t.tk == "..." then
+            table.insert(names, t.tk)
+            any_named = true
+         elseif t.kind == "identifier" and nxt and nxt.tk == ":" then
+            table.insert(names, t.tk)
+            any_named = true
+         elseif t.tk == "?" and tokens[i + 1] and tokens[i + 1].kind == "identifier" and tokens[i + 2] and tokens[i + 2].tk == ":" then
+            table.insert(names, tokens[i + 1].tk)
+            any_named = true
+         else
+            table.insert(names, "_")
+         end
+      end
+      i = i + 1
+   end
+   if not any_named then
+      return nil
+   end
+   return names
+end
+
 function Document:get_function_args_string(type_info)
    local node = self:get_ast_node_at(type_info)
-   if node == nil then return nil end
+   if node == nil then
+      return self:_function_type_arg_names(type_info)
+   end
    local output = {}
    for _, arg_info in ipairs(node.args) do
       table.insert(output, arg_info.tk)
    end
    return output
+end
+
+
+function Document:get_line(line)
+   if not self._content_lines then
+      self._content_lines = position.split_lines(self._content)
+   end
+   return self._content_lines[line + 1] or ""
+end
+
+
+
+function Document:to_lsp_position(y, x)
+   local line = math.max(y - 1, 0)
+   return lsp.position(line, position.byte_to_utf16(self:get_line(line), x - 1))
+end
+
+
+
+function Document:to_byte_position(pos)
+   return lsp.position(pos.line, position.utf16_to_byte(self:get_line(pos.line), pos.character))
+end
+
+
+function Document:byte_to_lsp_position(line, byte_col)
+   return lsp.position(line, position.byte_to_utf16(self:get_line(line), byte_col))
 end
 
 function Document:clear_cache()
@@ -211,33 +330,6 @@ function Document:update_text(text, version)
    self._tree_cursor = self._tree:root():create_cursor()
 end
 
-local function make_diagnostic_from_error(tks, err, severity)
-   local x, y = err.x, err.y
-   local err_tk = tl.get_token_at(tks, y, x)
-   return {
-      range = {
-         start = {
-            line = y - 1,
-            character = x - 1,
-         },
-         ["end"] = {
-            line = y - 1,
-            character = (err_tk and x + #err_tk - 1) or x,
-         },
-      },
-      severity = lsp.severity[severity],
-      message = err.msg,
-   }
-end
-
-local function insert_errs(fname, diags, tks, errs, sev)
-   for _, err in ipairs(errs or {}) do
-      if fname == err.filename then
-         table.insert(diags, make_diagnostic_from_error(tks, err, sev))
-      end
-   end
-end
-
 function Document:_publish_diagnostics(diagnostics, version)
    logger:debug("Publishing diagnostics for %s...", self._uri.path)
 
@@ -250,65 +342,160 @@ function Document:_publish_diagnostics(diagnostics, version)
    })
 end
 
-local function imap(t, fn, start, finish)
-   local new = {}
-   for i = start or 1, finish or #t do
-      new[i] = fn(t[i])
+
+
+function Document:get_problems()
+   local cache = self._cache
+   if cache.problems then
+      return cache.problems
    end
-   return new
+
+   local tks, lex_errs = self:_get_tokens()
+   local input = {
+      filename = self._uri.path,
+      content = self._content,
+      is_lua = is_lua(self._uri.path),
+      tokens = tks,
+      lex_errors = lex_errs,
+      settings = self._server_state.lint_settings,
+   }
+   logger:debug("Detected %d lex errors", #lex_errs)
+   if #lex_errs == 0 then
+      local ast, parse_errs = self:_get_ast(tks)
+      input.ast = ast
+      input.parse_errors = parse_errs
+      logger:debug("Detected %d parse errors", #parse_errs)
+      if #parse_errs == 0 then
+         input.result = self:_get_result(ast)
+         input.report = self:get_type_report()
+      end
+   end
+
+   cache.problems = engine.run(input)
+   return cache.problems
+end
+
+local severity_to_lsp = {
+   error = lsp.severity.Error,
+   warning = lsp.severity.Warning,
+   info = lsp.severity.Information,
+   hint = lsp.severity.Hint,
+}
+
+local tag_to_lsp = {
+   unnecessary = lsp.diagnostic_tag.Unnecessary,
+   deprecated = lsp.diagnostic_tag.Deprecated,
+}
+
+function Document:to_lsp_range(y, x, yend, xend)
+   return {
+      start = self:to_lsp_position(y, x),
+      ["end"] = self:to_lsp_position(yend, xend),
+   }
+end
+
+function Document:problem_to_diagnostic(p)
+   local tags
+   for _, t in ipairs(p.tags or {}) do
+      tags = tags or {}
+      table.insert(tags, tag_to_lsp[t])
+   end
+   return {
+      range = self:to_lsp_range(p.y, p.x, p.yend, p.xend),
+      severity = severity_to_lsp[p.severity],
+      message = p.message,
+      code = p.rule_id,
+      source = "teal",
+      tags = tags,
+      data = { version = self._version },
+   }
+end
+
+
+function Document:get_symbols()
+   local cache = self._cache
+   if not cache.symbols then
+      local tks = self:_get_tokens()
+      local ast = self:_get_ast(tks)
+      local ok, result = pcall(doc_symbols.document_symbols, tks, ast)
+      if ok then
+         cache.symbols = result
+      else
+         logger:error("Computing document symbols failed for %s: %s", self._uri.path, tostring(result))
+         cache.symbols = {}
+      end
+   end
+   return cache.symbols
+end
+
+
+function Document:get_dependency_files()
+   local out = {}
+   local result = self._cache.result
+   if result and result.dependencies then
+      for _, file in pairs(result.dependencies) do
+         table.insert(out, self._server_state:absolute_path(file))
+      end
+   end
+   table.sort(out)
+   return out
+end
+
+
+function Document:get_tokens()
+   return (self:_get_tokens())
+end
+
+function Document:get_ast()
+   local tks = self:_get_tokens()
+   return (self:_get_ast(tks))
+end
+
+
+
+
+
+function Document:compute_fix_all()
+   local max_passes = 10
+   local text = self._content
+   local problems = self:get_problems()
+   local config = self._server_state.config or {}
+   local env_options = {
+      defaults = self._server_state:get_env().defaults,
+      predefined_modules = { config.global_env_def },
+   }
+   for _ = 1, max_passes do
+      local fixes = {}
+      for _, p in ipairs(problems) do
+         if p.fix then
+            table.insert(fixes, p.fix)
+         end
+      end
+      if #fixes == 0 then
+         break
+      end
+      local new_text, applied = fixer.apply_fixes(text, fixes)
+      if applied == 0 or new_text == text then
+         break
+      end
+      text = new_text
+      if applied == #fixes then
+         break
+      end
+      problems = linter.lint_text(text, self._uri.path, self._server_state.lint_settings, env_options)
+   end
+   if text == self._content then
+      return nil
+   end
+   return text
 end
 
 function Document:process_and_publish_results()
-   local tks, err_tks = self:_get_tokens()
-   logger:debug("Detected %d lex errors", #err_tks)
-   if #err_tks > 0 then
-      self:_publish_diagnostics(imap(err_tks, function(t)
-         return {
-            range = {
-               start = lsp.position(t.y - 1, t.x - 1),
-               ["end"] = lsp.position(t.y - 1, t.x - 1),
-            },
-            severity = lsp.severity.Error,
-            message = "Unexpected token",
-         }
-      end))
-      return
-   end
-
-   local ast, parse_errs = self:_get_ast(tks)
-   logger:debug("Detected %d parse errors", #parse_errs)
-   if #parse_errs > 0 then
-      self:_publish_diagnostics(imap(parse_errs, function(e)
-         return make_diagnostic_from_error(tks, e, "Error")
-      end))
-      return
-   end
-
    local diags = {}
-   local fname = self._uri.path
-   local result = self:_get_result(ast)
-
-   logger:debug("Detected %d type errors", #result.type_errors)
-
-   local config = self._server_state.config
-   local disabled_warnings = set(config.disable_warnings or {})
-   local warning_errors = set(config.warning_error or {})
-   local enabled_warnings = filter(result.warnings, function(e)
-      if is_lua(self._uri.path) then
-         return not (disabled_warnings[e.tag] or
-         e.msg:find("unknown variable"))
-      else
-         return not disabled_warnings[e.tag]
-      end
-      return
-   end)
-   local werrors, warnings = filter(enabled_warnings, function(e)
-      return warning_errors[e.tag]
-   end)
-   insert_errs(fname, diags, tks, warnings, "Warning")
-   insert_errs(fname, diags, tks, werrors, "Error")
-   insert_errs(fname, diags, tks, result.type_errors, "Error")
-   self:_publish_diagnostics(diags)
+   for _, p in ipairs(self:get_problems()) do
+      table.insert(diags, self:problem_to_diagnostic(p))
+   end
+   self:_publish_diagnostics(diags, self._version)
 end
 
 
@@ -575,11 +762,17 @@ function Document:_tree_sitter_token(y, x)
 
       local parent_node = self._tree_cursor:current_node()
 
+      local node_start = node:start_point()
+      local node_end = node:end_point()
       local out = {
          type = node:type(),
          source = node:source(),
          parent_type = parent_node:type(),
          parent_source = parent_node:source(),
+         start_line = node_start.row,
+         start_col = node_start.column,
+         end_line = node_end.row,
+         end_col = node_end.column,
       }
 
 
@@ -701,6 +894,12 @@ class.setup(Document, "Document", {
    getters = {
       uri = function(self)
          return self._uri
+      end,
+      version = function(self)
+         return self._version
+      end,
+      content = function(self)
+         return self._content
       end,
    },
    nilable_members = { '_content_lines' },

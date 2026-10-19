@@ -202,6 +202,30 @@ function LspClient:_send(msg)
     end)
 end
 
+-- Writes several messages in a single write, so the server receives them
+-- together. Each entry is { method = ..., params = ..., request = true|nil }.
+-- Returns the ids assigned to the requests, in order.
+function LspClient:send_batch(messages)
+    local frames, ids = {}, {}
+    for _, m in ipairs(messages) do
+        local msg = { jsonrpc = "2.0", method = m.method, params = m.params or cjson.null }
+        if m.request then
+            msg.id = self._next_id
+            self._next_id = self._next_id + 1
+            table.insert(ids, msg.id)
+        end
+        local json = cjson.encode(msg)
+        table.insert(frames, "Content-Length: " .. #json .. "\r\n\r\n" .. json)
+    end
+    self._sends_attempted = (self._sends_attempted or 0) + 1
+    uv.write(self._stdin, table.concat(frames), function(err)
+        if err then
+            self._write_errors = (self._write_errors or "") .. tostring(err) .. "\n"
+        end
+    end)
+    return ids
+end
+
 function LspClient:request(method, params)
     local id = self._next_id
     self._next_id = self._next_id + 1
@@ -255,11 +279,11 @@ function LspClient:wait_for_notification(method, timeout_ms)
     return table.remove(self._notifications[method], 1)
 end
 
-function LspClient:initialize(root_uri)
+function LspClient:initialize(root_uri, capabilities)
     local id = self:request("initialize", {
         processId = cjson.null,
         rootUri = root_uri or get_root_uri(),
-        capabilities = {},
+        capabilities = capabilities or {},
     })
     local response = self:wait_for_response(id)
     self:notify("initialized", {})
@@ -334,6 +358,60 @@ function LspClient:get_signature_help(uri, line, character)
         position = { line = line, character = character },
     })
     return self:wait_for_response(id)
+end
+
+function LspClient:get_code_actions(uri, range, context)
+    local id = self:request("textDocument/codeAction", {
+        textDocument = { uri = uri },
+        range = range,
+        context = context or { diagnostics = {} },
+    })
+    return self:wait_for_response(id)
+end
+
+-- Applies LSP TextEdits (UTF-16 ranges) to `text`, as an editor would.
+function LspClient.apply_text_edits(text, edits)
+    local position = require("teal_language_server.util.position")
+    local lines = position.split_lines(text)
+    local line_starts = {}
+    local offset = 1
+    for i, line in ipairs(lines) do
+        line_starts[i] = offset
+        offset = offset + #line + 1
+    end
+    local function to_offset(pos)
+        local line = lines[pos.line + 1]
+        if line == nil then
+            return #text + 1
+        end
+        return line_starts[pos.line + 1] + position.utf16_to_byte(line, pos.character)
+    end
+    local resolved = {}
+    for i, e in ipairs(edits) do
+        table.insert(resolved, { s = to_offset(e.range.start), e = to_offset(e.range["end"]), text = e.newText, i = i })
+    end
+    -- apply back to front so earlier offsets stay valid
+    table.sort(resolved, function(a, b)
+        if a.s ~= b.s then return a.s > b.s end
+        return a.i > b.i
+    end)
+    for _, r in ipairs(resolved) do
+        text = text:sub(1, r.s - 1) .. r.text .. text:sub(r.e)
+    end
+    return text
+end
+
+-- Applies the edits for `uri` from a WorkspaceEdit (either `changes` or `documentChanges`).
+function LspClient.apply_workspace_edit(text, uri, edit)
+    if edit.documentChanges then
+        for _, change in ipairs(edit.documentChanges) do
+            if change.textDocument.uri == uri then
+                text = LspClient.apply_text_edits(text, change.edits)
+            end
+        end
+        return text
+    end
+    return LspClient.apply_text_edits(text, edit.changes[uri] or {})
 end
 
 function LspClient:shutdown()

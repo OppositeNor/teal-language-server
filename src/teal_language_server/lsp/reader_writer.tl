@@ -14,6 +14,7 @@ local record LspReaderWriter
    _stdin_reader:StdinReader
    _stdout: uv.Pipe
    _disposed: boolean
+   _responses_sent: integer
 
    metamethod __call: function(self: LspReaderWriter, stdin_reader: StdinReader): LspReaderWriter
 end
@@ -22,6 +23,13 @@ function LspReaderWriter:__init(stdin_reader: StdinReader)
    asserts.is_not_nil(stdin_reader)
    self._stdin_reader = stdin_reader
    self._disposed = false
+   self._responses_sent = 0
+end
+
+-- Number of responses (results or errors) sent so far. Used by the events
+-- manager to detect request handlers that returned without responding.
+function LspReaderWriter:get_response_count(): integer
+   return self._responses_sent
 end
 
 local record HeaderInfo
@@ -132,6 +140,7 @@ function LspReaderWriter:_encode(t: {string:any})
 end
 
 function LspReaderWriter:send_rpc(id: integer, t: {string:any})
+   self._responses_sent = self._responses_sent + 1
    self:_encode {
       jsonrpc = "2.0",
       id = json_nullable(id),
@@ -139,7 +148,8 @@ function LspReaderWriter:send_rpc(id: integer, t: {string:any})
    }
 end
 
-function LspReaderWriter:send_rpc_error(id: integer, name: lsp.ErrorName, msg: string, data: {string:any})
+function LspReaderWriter:send_rpc_error(id: integer, name: lsp.ErrorName, msg: string, data?: {string:any})
+   self._responses_sent = self._responses_sent + 1
    self:_encode {
       jsonrpc = "2.0",
       id = json_nullable(id),

@@ -124,8 +124,13 @@ function lsp_formatter.show_type(node_info, type_info, doc)
 
    elseif type_info.t == tl.typecodes.RECORD then
       table.insert(sb.strings, "record " .. safe_str)
-      for key, type_ref in pairs(type_info.fields) do
-         local type_ref_info = doc:resolve_type_ref(type_ref)
+      local keys = {}
+      for key in pairs(type_info.fields) do
+         table.insert(keys, key)
+      end
+      table.sort(keys)
+      for _, key in ipairs(keys) do
+         local type_ref_info = doc:resolve_type_ref(type_info.fields[key])
          if type_ref_info and type_ref_info.str then
             table.insert(sb.strings, '   ' .. key .. ': ' .. type_ref_info.str)
          end

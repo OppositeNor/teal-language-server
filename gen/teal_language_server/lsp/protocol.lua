@@ -159,6 +159,35 @@ local lsp = { Message = { ResponseError = {} }, Position = {}, Range = {}, Locat
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 lsp.error_code = {
    InternalError = -32603,
    InvalidParams = -32602,
@@ -171,6 +200,7 @@ lsp.error_code = {
    serverErrorStart = -32099,
 
    RequestCancelled = -32800,
+   RequestFailed = -32803,
 }
 
 lsp.severity = {
@@ -178,6 +208,18 @@ lsp.severity = {
    Warning = 2,
    Information = 3,
    Hint = 4,
+}
+
+lsp.diagnostic_tag = {
+   Unnecessary = 1,
+   Deprecated = 2,
+}
+
+lsp.message_type = {
+   Error = 1,
+   Warning = 2,
+   Info = 3,
+   Log = 4,
 }
 
 lsp.sync_kind = {
