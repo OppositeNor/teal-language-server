@@ -257,8 +257,11 @@ function LanguageFeatureHandlers:_on_completion(params: lsp.Method.Params, id: i
    local report = doc:get_type_report()
    local path = doc.uri.path
    local candidates: {completion.Candidate}
+   -- the record whose fields are offered (member access, constructors)
+   local member_receiver: tl.TypeInfo
    if ctx.kind == "member" then
       local receiver = expression_type(doc, ctx.receiver, ctx.in_type)
+      member_receiver = receiver
       if receiver == nil then
          logger:info("Completion receiver has no recorded type")
       end
@@ -272,12 +275,30 @@ function LanguageFeatureHandlers:_on_completion(params: lsp.Method.Params, id: i
       -- a record constructor: its fields, not the scope (a record has no
       -- positional entries)
       local table_type = semantic.type_at_key(report, path, ctx.table_open.y, ctx.table_open.x, 0)
+      member_receiver = table_type
       candidates = completion.constructor_candidates(report, table_type, ctx.present_keys)
    else
       candidates = completion.scope_candidates(report, path, pos.line + 1, pos.character + 1,
          doc:get_type_positions(), ctx.prefix_y, ctx.prefix_x)
       for _, c in ipairs(completion.keyword_candidates(completion.keywords)) do
          table.insert(candidates, c)
+      end
+   end
+
+   -- what completionItem/resolve needs to find a candidate's documentation:
+   -- a local's declaration line, or the owning record of a member
+   local owner_key: string
+   do
+      if member_receiver and (member_receiver.t == tl.typecodes.RECORD or member_receiver.t == tl.typecodes.INTERFACE)
+         and member_receiver.y and member_receiver.x then
+         owner_key = self._server_state:absolute_path((member_receiver.file and member_receiver.file ~= "") and member_receiver.file or path)
+            .. ":" .. member_receiver.y .. ":" .. member_receiver.x
+      end
+   end
+   local scope_decls: {string:integer} = {}
+   if ctx.kind == "scope" or ctx.kind == "type" then
+      for _, sym in ipairs(semantic.visible_symbols(report, path, pos.line + 1, pos.character + 1)) do
+         scope_decls[sym.name] = sym.y
       end
    end
 
@@ -299,6 +320,14 @@ function LanguageFeatureHandlers:_on_completion(params: lsp.Method.Params, id: i
          item.kind = candidate_kind_to_lsp[c.kind] or item.kind
       end
       item.sortText = string.format("%02d_%s", c.tier, c.label)
+      if owner_key and c.kind ~= "keyword" then
+         item.data = { uri = Uri.tostring(doc.uri), owner = owner_key, name = c.label }
+      elseif scope_decls[c.label] and c.kind ~= "keyword" then
+         item.data = { uri = Uri.tostring(doc.uri), file = path, line = scope_decls[c.label] }
+      elseif c.type_info and c.type_info.t == tl.typecodes.FUNCTION and c.type_info.y and c.type_info.file then
+         -- a function on a module table: tl records its type at `function M.f`
+         item.data = { uri = Uri.tostring(doc.uri), file = c.type_info.file, line = c.type_info.y }
+      end
       table.insert(items, item)
    end
 
@@ -467,15 +496,35 @@ end
 -- A function declared on a module table (`function M.f`), for which the
 -- resolver lists no declaration, is found at its function type's position,
 -- which tl records at that statement.
+-- The documentation comment of a declaration on line `y` of `file` (the
+-- current document's when `file` is empty). An open buffer's text wins over
+-- the file on disk.
+function LanguageFeatureHandlers:_doc_at(doc: Document, file: string, y: integer): string
+   file = (file == nil or file == "") and doc.uri.path or self._server_state:absolute_path(file)
+   local open_doc = self._document_manager:get(Uri.uri_from_path(file))
+   local tokens = open_doc and open_doc:get_tokens() or doc:_tokens_of_file(file)
+   return tokens and semantic.doc_comment(tokens, y)
+end
+
+-- The documentation comment of a record field or method, found through the
+-- declarations of (record identity, name), as references does.
+function LanguageFeatureHandlers:_field_doc(doc: Document, owner_key: string, name: string): string
+   local loader = function(p: string): {symbols.Symbol} return handler_helper.load_symbols(self._document_manager, p) end
+   local target: references.Target = { kind = "field", name = name, owner_key = owner_key }
+   for _, decl in ipairs(references.declarations(target, loader)) do
+      local text = self:_doc_at(doc, decl.file, decl.y)
+      if text then
+         return text
+      end
+   end
+   return nil
+end
+
 function LanguageFeatureHandlers:_declaration_doc(doc: Document, pos: lsp.Position, type_info: tl.TypeInfo): string
    local normalize = function(p: string): string return self._server_state:absolute_path(p) end
    local loader = function(p: string): {symbols.Symbol} return handler_helper.load_symbols(self._document_manager, p) end
    local function doc_at(file: string, y: integer): string
-      file = (file == nil or file == "") and doc.uri.path or normalize(file)
-      -- an open buffer's text wins over the file on disk
-      local open_doc = self._document_manager:get(Uri.uri_from_path(file))
-      local tokens = open_doc and open_doc:get_tokens() or doc:_tokens_of_file(file)
-      return tokens and semantic.doc_comment(tokens, y)
+      return self:_doc_at(doc, file, y)
    end
    local ok, target = pcall(references.resolve_target, handler_helper.view(doc), normalize, pos.line + 1, pos.character + 1)
    if not ok or target == nil then
@@ -593,7 +642,36 @@ function LanguageFeatureHandlers:_on_inlay_hint(params: lsp.Method.Params, id: i
    self._lsp_reader_writer:send_rpc(id, result as {string:any})
 end
 
+-- completionItem/resolve: adds the documentation comment of the item's
+-- declaration (see `data` in _on_completion). Other fields are returned as
+-- they came.
+function LanguageFeatureHandlers:_on_completion_resolve(params: lsp.Method.Params, id: integer): nil
+   local item = params as {string:any}
+   local data = item.data as {string:any}
+   if type(data) == "table" and type(data.uri) == "string" then
+      local doc = self._document_manager:get(Uri.parse(data.uri as string))
+      local text: string
+      if doc then
+         if type(data.owner) == "string" then
+            text = self:_field_doc(doc, data.owner as string, data.name as string)
+         elseif type(data.line) == "number" then
+            text = self:_doc_at(doc, data.file as string, math.floor(data.line as number))
+         end
+      end
+      if text then
+         local existing = item.documentation as {string:any}
+         if type(existing) == "table" and type(existing.value) == "string" then
+            existing.value = (existing.value as string) .. "\n\n" .. text
+         else
+            item.documentation = { kind = "markdown", value = text }
+         end
+      end
+   end
+   self._lsp_reader_writer:send_rpc(id, item)
+end
+
 function LanguageFeatureHandlers:initialize()
+   self._lsp_events_manager:set_handler("completionItem/resolve", function(params: lsp.Method.Params, id: integer) self:_on_completion_resolve(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/completion", function(params: lsp.Method.Params, id: integer) self:_on_completion(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/signatureHelp", function(params: lsp.Method.Params, id: integer) self:_on_signature_help(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/hover", function(params: lsp.Method.Params, id: integer) self:_on_hover(params, id) end)

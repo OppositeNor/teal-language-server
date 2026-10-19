@@ -99,6 +99,7 @@ local record lsp
          "textDocument/typeDefinition"
          "textDocument/publishDiagnostics"
          "textDocument/completion"
+         "completionItem/resolve"
          "textDocument/signatureHelp"
          "textDocument/codeAction"
          "textDocument/documentSymbol"

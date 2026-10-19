@@ -78,6 +78,7 @@ local capabilities = {
    typeDefinitionProvider = true,
    completionProvider = {
       triggerCharacters = { ".", ":", "\"", "'" },
+      resolveProvider = true,
    },
    signatureHelpProvider = {
       triggerCharacters = { "(" }

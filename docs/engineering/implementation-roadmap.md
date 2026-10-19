@@ -26,15 +26,11 @@ Each milestone is a vertical slice with the same parts:
 
 | S6 (P1) | **Documentation comments in hover** (was N3) | `semantic.doc_comment` reads the comment block that tl's lexer attaches to the declaration's first token; the declaration comes from `references.declarations` | `tests/hover_docs_test.lua` |
 
-Suite after S1–S6: **155 tests, 152 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
+| S7 (P1) | **Documentation in completion items** (was N3) | `completionItem/resolve` looks up the item's declaration comment: locals by declaration line, fields and methods through `references.declarations`, module-table functions at their function type | `hover_docs_test` "completionItem/resolve …" |
+
+Suite after S1–S7: **156 tests, 153 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
 
 ## Next (in priority order)
-
-### N3 (P1): documentation in completion items
-
-Hover shows declaration comments (S6). Completion items could carry them too, through
-`completionItem/resolve` so that the list stays cheap: the item's `data` holds the candidate's
-declaration, as typescript-language-server's `cacheId` does.
 
 ### N4 (P2): cross-file references and rename for exported fields
 

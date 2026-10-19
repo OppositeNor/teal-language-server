@@ -165,7 +165,9 @@ current snapshot on every request, and nothing holds an identity across versions
    * a signature in `documentation`;
    * snippet arguments only when the client supports snippets **and** no `(` follows the cursor.
 
-   `completionItem/resolve` is not used: items are cheap to build at current sizes.
+   Documentation comments are added lazily by `completionItem/resolve`. The item's `data` holds the
+   declaration line (locals) or the record identity and name (members). This keeps the list cheap,
+   as typescript-language-server's `cacheId` does.
 
 ## 5. Concurrency and cancellation
 
