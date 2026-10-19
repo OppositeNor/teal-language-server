@@ -102,6 +102,10 @@ right after, and results are cached per snapshot. Buffers over 512 KiB skip the 
 | record field / method | (record identity = declaration position of the record type, field name) | one env |
 | type name | declaration position | one snapshot (rename refused, see the feature matrix) |
 
+Definition, references, highlight and rename all classify the cursor with
+`references.resolve_target`. Definition returns `references.declarations(target)`, so it is always
+one of the declarations that references report.
+
 Identities are **not stable across edits**. A position-based identity is recomputed from the
 current snapshot on every request, and nothing holds an identity across versions.
 

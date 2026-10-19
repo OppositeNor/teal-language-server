@@ -12,10 +12,8 @@ local LspEventsManager <const> = require("teal_language_server.lsp.events_manage
 local symbols <const> = require("teal_language_server.analysis.symbols")
 local references <const> = require("teal_language_server.analysis.references")
 local workspace_index <const> = require("teal_language_server.analysis.workspace_index")
-local ast_walk <const> = require("teal_language_server.analysis.diagnostics.ast_walk")
 local position <const> = require("teal_language_server.util.position")
 local Uri <const> = require("teal_language_server.util.uri")
-local tl <const> = require("tl")
 local lsp <const> = require("teal_language_server.lsp.protocol")
 local logging <const> = require("teal_language_server.logging")
 local class <const> = require("teal_language_server.util.class")
@@ -89,36 +87,11 @@ function NavigationHandlers:_open_doc(path: string): Document
 end
 
 function NavigationHandlers:_load_symbols(path: string): {symbols.Symbol}
-   local doc = self:_open_doc(path)
-   if doc then
-      return doc:get_symbols()
-   end
-   local fd = io.open(path, "rb")
-   if not fd then
-      return {}
-   end
-   local text = fd:read("*a")
-   fd:close()
-   local tokens = tl.lex(text, path)
-   local errs: {tl.Error} = {}
-   local ast = ast_walk.parse_program(tokens, errs, path)
-   local ok, result = pcall(symbols.document_symbols, tokens, ast as ast_walk.AstNode)
-   return ok and result as {symbols.Symbol} or {}
+   return handler_helper.load_symbols(self._document_manager, path)
 end
 
 function NavigationHandlers:_view(doc: Document): references.View
-   -- make sure the document has been type checked so its by_pos data is current
-   doc:get_problems()
-   return {
-      path = doc.uri.path,
-      tokens = doc:get_tokens(),
-      ast = doc:get_ast() as ast_walk.AstNode,
-      report = doc:get_type_report(),
-      declaration_of = function(name: string, y: integer, x: integer): integer, integer
-         return doc:symbol_declaration_position(name, y, x)
-      end,
-      symbols = doc:get_symbols(),
-   }
+   return handler_helper.view(doc)
 end
 
 function NavigationHandlers:_views_for(target: references.Target, current: Document): {references.View}

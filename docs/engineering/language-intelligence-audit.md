@@ -209,6 +209,19 @@ Fix: `ast_walk.parse_program` parses a copy of the list. All five call sites use
 speculative check, linter, workspace index, navigation. A regression test checks that the caller's
 list is unchanged.
 
+### F8 (medium, fixed): definition and references disagreed
+
+Definition used its own lookup path: name → scope walk, field → the position of the field's
+*type*. References used `analysis/references.tl`. As a result:
+
+* go-to-definition of `p:len()` landed on the `function` keyword (the function type's position);
+* go-to-definition of a primitive field went to the enclosing record;
+* every range was zero-width.
+
+Definition now resolves through `references.resolve_target` and `references.declarations`, as
+rust-analyzer's goto-definition and find-usages share `NameRefClass`.
+`tests/navigation_agreement_test.lua` asserts that every definition is among the reported references.
+
 ### F6 (open): cross-file navigation scope
 
 References and rename for globals and record fields cover open files only. Teal has no cheap

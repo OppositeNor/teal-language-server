@@ -12,6 +12,8 @@ local position <const> = require("teal_language_server.util.position")
 local lsp <const> = require("teal_language_server.lsp.protocol")
 local logging <const> = require("teal_language_server.logging")
 local class <const> = require("teal_language_server.util.class")
+local references <const> = require("teal_language_server.analysis.references")
+local symbols <const> = require("teal_language_server.analysis.symbols")
 
 local logger = logging.get_logger(_module_name)
 
@@ -94,8 +96,55 @@ end
 -- that field's type is declared (which works across files for record/function
 -- fields), falling back to the enclosing record's declaration when the field's
 -- type has no position (e.g. primitives like boolean).
+-- Declarations of the symbol under the cursor, from the same resolver that
+-- references and rename use, so that definition is always one of the
+-- declarations references report. Returns nil when the resolver has no
+-- declaration for it (globals, names it does not track).
+function DefinitionHandlers:_semantic_definition(doc: Document, pos: lsp.Position): {{string:any}}
+   local normalize = function(p: string): string return self._server_state:absolute_path(p) end
+   local loader = function(p: string): {symbols.Symbol} return handler_helper.load_symbols(self._document_manager, p) end
+   local ok, target = pcall(references.resolve_target, handler_helper.view(doc), normalize, pos.line + 1, pos.character + 1)
+   if not ok or target == nil then
+      return nil
+   end
+   local out: {{string:any}} = {}
+   for _, loc in ipairs(references.declarations(target as references.Target, loader)) do
+      local file = loc.file == "" and doc.uri.path or normalize(loc.file)
+      local uri = Uri.uri_from_path(Path(file).value)
+      local target_doc = self._document_manager:get(uri)
+      local range: lsp.Range
+      if target_doc then
+         range = target_doc:to_lsp_range(loc.y, loc.x, loc.yend, loc.xend)
+      else
+         local line_text = position.read_file_line(uri.path, loc.y - 1)
+         range = {
+            start = lsp.position(loc.y - 1, position.byte_to_utf16(line_text, loc.x - 1)),
+            ["end"] = lsp.position(loc.yend - 1, position.byte_to_utf16(line_text, loc.xend - 1)),
+         }
+      end
+      table.insert(out, { uri = Uri.tostring(uri), range = range })
+   end
+   if #out == 0 then
+      return nil
+   end
+   return out
+end
+
 function DefinitionHandlers:_on_definition(params: lsp.Method.Params, id: integer): nil
    local pos <const> = handler_helper.byte_position(self._document_manager, params)
+   local current = handler_helper.get_document(self._document_manager, params)
+   if current then
+      local locations = self:_semantic_definition(current, pos)
+      if locations then
+         -- a single declaration as a Location, several as Location[]
+         if #locations == 1 then
+            self._lsp_reader_writer:send_rpc(id, locations[1])
+         else
+            self._lsp_reader_writer:send_rpc(id, locations as {string:any})
+         end
+         return
+      end
+   end
    local node_info, doc = handler_helper.get_node_info(self._document_manager, params, pos)
    if node_info == nil then
       self._lsp_reader_writer:send_rpc(id, nil)

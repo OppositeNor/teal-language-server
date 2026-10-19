@@ -4,6 +4,10 @@ local DocumentManager <const> = require("teal_language_server.analysis.document_
 local Document <const> = require("teal_language_server.analysis.document")
 local Uri <const> = require("teal_language_server.util.uri")
 local lsp <const> = require("teal_language_server.lsp.protocol")
+local references <const> = require("teal_language_server.analysis.references")
+local symbols <const> = require("teal_language_server.analysis.symbols")
+local ast_walk <const> = require("teal_language_server.analysis.diagnostics.ast_walk")
+local tl <const> = require("tl")
 local logging <const> = require("teal_language_server.logging")
 
 local logger = logging.get_logger(_module_name)
@@ -66,6 +70,41 @@ function handler_helper.get_node_info(document_manager: DocumentManager, params:
    end
    logger:debug("Found node info: %s", node_info)
    return node_info, doc
+end
+
+-- Outline of a file: from its open document, else parsed from disk.
+function handler_helper.load_symbols(document_manager: DocumentManager, path: string): {symbols.Symbol}
+   local doc = document_manager:get(Uri.uri_from_path(path))
+   if doc then
+      return doc:get_symbols()
+   end
+   local fd = io.open(path, "rb")
+   if not fd then
+      return {}
+   end
+   local text = fd:read("*a")
+   fd:close()
+   local tokens = tl.lex(text, path)
+   local errs: {tl.Error} = {}
+   local ast = ast_walk.parse_program(tokens, errs, path)
+   local ok, result = pcall(symbols.document_symbols, tokens, ast as ast_walk.AstNode)
+   return ok and result as {symbols.Symbol} or {}
+end
+
+-- What the symbol resolver (analysis/references) needs from a document.
+function handler_helper.view(doc: Document): references.View
+   -- make sure the document has been type checked so its by_pos data is current
+   doc:get_problems()
+   return {
+      path = doc.uri.path,
+      tokens = doc:get_tokens(),
+      ast = doc:get_ast() as ast_walk.AstNode,
+      report = doc:get_type_report(),
+      declaration_of = function(name: string, y: integer, x: integer): integer, integer
+         return doc:symbol_declaration_position(name, y, x)
+      end,
+      symbols = doc:get_symbols(),
+   }
 end
 
 return handler_helper

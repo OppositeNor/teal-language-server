@@ -504,6 +504,24 @@ local function field_declarations(target, load_symbols)
 end
 
 
+
+
+
+function references.declarations(target, load_symbols)
+   if target.kind == "local" or target.kind == "type" then
+      return { { file = target.file, kind = "decl", y = target.decl_y, x = target.decl_x, yend = target.decl_y, xend = target.decl_x + #target.name } }
+   elseif target.kind == "field" then
+      local decls = field_declarations(target, load_symbols)
+      table.sort(decls, function(a, b)
+         if a.y ~= b.y then return a.y < b.y end
+         return a.x < b.x
+      end)
+      return decls
+   end
+   return {}
+end
+
+
 function references.owner_file(target)
    if target.owner_key == nil or target.owner_key:sub(1, 4) == "var:" then
       return nil

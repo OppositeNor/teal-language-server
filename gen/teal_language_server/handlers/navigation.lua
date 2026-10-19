@@ -1,4 +1,4 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local io = _tl_compat and _tl_compat.io or io; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local pairs = _tl_compat and _tl_compat.pairs or pairs; local pcall = _tl_compat and _tl_compat.pcall or pcall; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.navigation"
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local pairs = _tl_compat and _tl_compat.pairs or pairs; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.navigation"
 
 
 
@@ -12,10 +12,8 @@ local LspEventsManager = require("teal_language_server.lsp.events_manager")
 local symbols = require("teal_language_server.analysis.symbols")
 local references = require("teal_language_server.analysis.references")
 local workspace_index = require("teal_language_server.analysis.workspace_index")
-local ast_walk = require("teal_language_server.analysis.diagnostics.ast_walk")
 local position = require("teal_language_server.util.position")
 local Uri = require("teal_language_server.util.uri")
-local tl = require("tl")
 local lsp = require("teal_language_server.lsp.protocol")
 local logging = require("teal_language_server.logging")
 local class = require("teal_language_server.util.class")
@@ -89,36 +87,11 @@ function NavigationHandlers:_open_doc(path)
 end
 
 function NavigationHandlers:_load_symbols(path)
-   local doc = self:_open_doc(path)
-   if doc then
-      return doc:get_symbols()
-   end
-   local fd = io.open(path, "rb")
-   if not fd then
-      return {}
-   end
-   local text = fd:read("*a")
-   fd:close()
-   local tokens = tl.lex(text, path)
-   local errs = {}
-   local ast = ast_walk.parse_program(tokens, errs, path)
-   local ok, result = pcall(symbols.document_symbols, tokens, ast)
-   return ok and result or {}
+   return handler_helper.load_symbols(self._document_manager, path)
 end
 
 function NavigationHandlers:_view(doc)
-
-   doc:get_problems()
-   return {
-      path = doc.uri.path,
-      tokens = doc:get_tokens(),
-      ast = doc:get_ast(),
-      report = doc:get_type_report(),
-      declaration_of = function(name, y, x)
-         return doc:symbol_declaration_position(name, y, x)
-      end,
-      symbols = doc:get_symbols(),
-   }
+   return handler_helper.view(doc)
 end
 
 function NavigationHandlers:_views_for(target, current)

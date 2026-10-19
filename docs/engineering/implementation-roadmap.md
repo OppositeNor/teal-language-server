@@ -22,16 +22,11 @@ Each milestone is a vertical slice with the same parts:
 | S3 (P1) | **Signature help on the shared callee query** | The callee is located on tokens (`expression_key`) and typed through `type_of_expression`, so unfinished, nested and higher-order calls work | `completion_context_test` "signature help on unfinished and higher-order calls" |
 | S4 (P1) | **Expected-type completion of enum values in strings** (was N1) | `literal_context` classifies the string's position: argument, declaration, assignment, comparison or constructor field. The expected type comes from tl's report, using declared types for assignment targets, where tl records the assigned value instead. Also fixes F7: tl's parser inserted tokens into the server's token list | `completion_context_test`: literal and token-list tests fail on `44941bb` |
 
-Suite after S1–S4: **150 tests, 147 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
+| S5 (P2) | **One classifier for definition and references** (was N2) | Definition asks `references.resolve_target` and the new `references.declarations` first, with full name ranges; methods give both their declaration and their implementation | `navigation_agreement_test` fails on `e682270` |
+
+Suite after S1–S5: **152 tests, 149 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
 
 ## Next (in priority order)
-
-### N2 (P2): definition / references agreement test and anchor fix
-
-Definition of a method lands on the `function` keyword of `function R:m`, while references report
-the name. Both should use the same anchor, the name token (`references.resolve_target` already
-computes it). Add a test asserting that definition ∈ references(includeDeclaration) for locals,
-fields and methods.
 
 ### N3 (P1): hover documentation from comments
 

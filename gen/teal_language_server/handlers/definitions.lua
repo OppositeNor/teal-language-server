@@ -1,4 +1,4 @@
-local _module_name = "handlers.definitions"
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local pcall = _tl_compat and _tl_compat.pcall or pcall; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.definitions"
 
 local handler_helper = require("teal_language_server.handlers.handler_helper")
 local DocumentManager = require("teal_language_server.analysis.document_manager")
@@ -12,6 +12,8 @@ local position = require("teal_language_server.util.position")
 local lsp = require("teal_language_server.lsp.protocol")
 local logging = require("teal_language_server.logging")
 local class = require("teal_language_server.util.class")
+local references = require("teal_language_server.analysis.references")
+local symbols = require("teal_language_server.analysis.symbols")
 
 local logger = logging.get_logger(_module_name)
 
@@ -94,8 +96,55 @@ end
 
 
 
+
+
+
+
+function DefinitionHandlers:_semantic_definition(doc, pos)
+   local normalize = function(p) return self._server_state:absolute_path(p) end
+   local loader = function(p) return handler_helper.load_symbols(self._document_manager, p) end
+   local ok, target = pcall(references.resolve_target, handler_helper.view(doc), normalize, pos.line + 1, pos.character + 1)
+   if not ok or target == nil then
+      return nil
+   end
+   local out = {}
+   for _, loc in ipairs(references.declarations(target, loader)) do
+      local file = loc.file == "" and doc.uri.path or normalize(loc.file)
+      local uri = Uri.uri_from_path(Path(file).value)
+      local target_doc = self._document_manager:get(uri)
+      local range
+      if target_doc then
+         range = target_doc:to_lsp_range(loc.y, loc.x, loc.yend, loc.xend)
+      else
+         local line_text = position.read_file_line(uri.path, loc.y - 1)
+         range = {
+            start = lsp.position(loc.y - 1, position.byte_to_utf16(line_text, loc.x - 1)),
+            ["end"] = lsp.position(loc.yend - 1, position.byte_to_utf16(line_text, loc.xend - 1)),
+         }
+      end
+      table.insert(out, { uri = Uri.tostring(uri), range = range })
+   end
+   if #out == 0 then
+      return nil
+   end
+   return out
+end
+
 function DefinitionHandlers:_on_definition(params, id)
    local pos = handler_helper.byte_position(self._document_manager, params)
+   local current = handler_helper.get_document(self._document_manager, params)
+   if current then
+      local locations = self:_semantic_definition(current, pos)
+      if locations then
+
+         if #locations == 1 then
+            self._lsp_reader_writer:send_rpc(id, locations[1])
+         else
+            self._lsp_reader_writer:send_rpc(id, locations)
+         end
+         return
+      end
+   end
    local node_info, doc = handler_helper.get_node_info(self._document_manager, params, pos)
    if node_info == nil then
       self._lsp_reader_writer:send_rpc(id, nil)

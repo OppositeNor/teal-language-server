@@ -503,6 +503,24 @@ local function field_declarations(target: Target, load_symbols: references.Symbo
    return out
 end
 
+-- Where `target` is declared, as references.find reports its "decl"
+-- locations: a local or type at its declaration, a field in its record body
+-- and/or at its `function R:f` implementation (the record body first).
+-- Empty for globals, whose declarations need a search of every file.
+function references.declarations(target: Target, load_symbols: references.SymbolLoader): {Location}
+   if target.kind == "local" or target.kind == "type" then
+      return { { file = target.file, kind = "decl", y = target.decl_y, x = target.decl_x, yend = target.decl_y, xend = target.decl_x + #target.name } }
+   elseif target.kind == "field" then
+      local decls = field_declarations(target, load_symbols)
+      table.sort(decls, function(a: Location, b: Location): boolean
+         if a.y ~= b.y then return a.y < b.y end
+         return a.x < b.x
+      end)
+      return decls
+   end
+   return {}
+end
+
 -- Declaring file of a field target's record, or nil for module-table targets.
 function references.owner_file(target: Target): string
    if target.owner_key == nil or target.owner_key:sub(1, 4) == "var:" then

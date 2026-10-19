@@ -141,11 +141,10 @@ tested.test("definition of self inside a function literal jumps to its parameter
 end)
 
 -- Line 20: "    return self.test_value", test_value at col 16.
--- The nil-token issue is fixed (self is kept literal), so the field access now resolves.
--- tl's type report does not expose record-field positions, and `test_value`'s type
--- (boolean) is a primitive with no position, so we fall back to the enclosing record's
--- declaration (line 0, `local record TestType`) rather than the exact field on line 1.
-tested.test("definition of field access test_value in self.test_value jumps to its enclosing record", function()
+-- Definition uses the same resolver as references: the field is identified by
+-- (record TestType, "test_value") and its declaration comes from the record's
+-- outline, so it lands on the field itself (line 1), not on the record.
+tested.test("definition of field access test_value in self.test_value jumps to the field declaration", function()
     local response = client:get_definition(uri, 20, 16)
     local result = response and response.result
 
@@ -157,8 +156,8 @@ tested.test("definition of field access test_value in self.test_value jumps to i
     })
     tested.assert({
         given = "definition result range",
-        should = "point to line 0 (the enclosing record TestType declaration)",
-        expected = 0,
+        should = "point to line 1 (the field test_value)",
+        expected = 1,
         actual = is_table(result) and is_table(result.range) and result.range.start.line,
     })
 end)
