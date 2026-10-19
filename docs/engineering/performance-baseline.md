@@ -55,6 +55,38 @@ lua5.4 -e 'package.path="luarocks_tree/share/lua/5.4/?.lua;"..package.path; pack
 |  1102 |  57.9 | 59.0 / 151.0 | 75.3 / 167.9 | 88.3 / 151.7 | 79.6 / 163.0 | 107 |
 |  5502 | 360.9 | 380.5 / 965.9 | 560.1 / 899.1 | 555.3 / 1126.1 | 569.6 / 1112.8 | 200 |
 
+**After S5 (definition through the references classifier) and S6 (hover documentation)**, 2026-10-19
+
+The first measurement of S5+S6 showed a regression (hover at 1102 lines: 134.5 / 209.3; at 5502:
+879.9 / 1444.7). The resolver walked the whole AST in ast_walk's sorted order on every request, and
+it built the outline eagerly. In-process profile at 1.1k lines:
+
+| Stage | Time (ms) |
+|---|---|
+| index walk | 10.7 |
+| outline | 13.4 |
+| `tl.check` (for comparison) | 28.6 |
+
+Fixed by:
+
+* a per-AST index of parents and name nodes, built in one unsorted traversal and cached for the
+  AST's lifetime. Verified to give the same parents as the sorted walk on 94 files / 146,537 nodes;
+* building the outline only when a field target needs it.
+
+| lines | open | completion, broken buffer | completion, valid buffer | hover | definition | RSS (MB) |
+|---|---|---|---|---|---|---|
+|   112 |  10.3 | 4.5 / 5.7 | 6.1 / 7.9 | 7.0 / 12.6 | 7.1 / 13.6 | 25 |
+|  1102 |  61.6 | 65.7 / 159.2 | 90.3 / 156.1 | 101.9 / 192.8 | 97.8 / 198.7 | 100 |
+|  5502 | 400.2 | 420.5 / 1092.1 | 598.2 / 1040.1 | 636.5 / 1197.7 | 645.8 / 1166.4 | 195 |
+
+Absolute numbers drift by about 10% between runs on this machine; compare columns within one run.
+Hover relative to valid-buffer completion at 1102 lines:
+
+* first measurement: 88.3 / 75.3 = 1.17;
+* now: 101.9 / 90.3 = 1.13.
+
+The remaining hover/definition overhead is the index build on the first request after an edit.
+
 ## Reading the numbers
 
 * **Valid buffers: no measurable change.** P50 differences are within run-to-run noise. The new

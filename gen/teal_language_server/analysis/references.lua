@@ -1,4 +1,4 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local math = _tl_compat and _tl_compat.math or math; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local math = _tl_compat and _tl_compat.math or math; local pairs = _tl_compat and _tl_compat.pairs or pairs; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table
 
 
 
@@ -19,6 +19,7 @@ local symbols = require("teal_language_server.analysis.symbols")
 
 
 local references = { Target = {}, Location = {}, View = {} }
+
 
 
 
@@ -133,19 +134,60 @@ local function expr_type(view, node)
 end
 
 
-local parents_cache = setmetatable({}, { __mode = "k" })
+
+
+
+
+
+
+local index_cache = setmetatable({}, { __mode = "k" })
+
+local function index_of(view)
+   local cached = index_cache[view.ast]
+   if cached then return cached end
+   local index = { parents = {}, names_by_line = {} }
+   local parents = index.parents
+   local names = index.names_by_line
+
+   local seen = {}
+   local function visit(node, parent)
+      if seen[node] then
+         return
+      end
+      seen[node] = true
+      parents[node] = parent
+      if NAME_KINDS[node.kind] and node.tk and node.y then
+         local row = names[node.y]
+         if row == nil then
+            row = {}
+            names[node.y] = row
+         end
+         table.insert(row, node)
+      end
+      for _, v in pairs(node) do
+         if ast_walk.is_node(v) then
+            visit(v, node)
+         elseif type(v) == "table" and (v).typename == nil then
+            for _, item in ipairs(v) do
+               if ast_walk.is_node(item) then
+                  visit(item, node)
+               end
+            end
+         end
+      end
+   end
+   if view.ast then
+      visit(view.ast, nil)
+   end
+   for _, row in pairs(names) do
+      table.sort(row, function(a, b) return a.x < b.x end)
+   end
+   index_cache[view.ast] = index
+   return index
+end
 
 local function parents_of(view)
-   local cached = parents_cache[view.ast]
-   if cached then return cached end
-   local parents = {}
-   ast_walk.walk(view.ast, {
-      ["*"] = function(node, parent)
-         parents[node] = parent
-      end,
-   })
-   parents_cache[view.ast] = parents
-   return parents
+   return index_of(view).parents
 end
 
 local function name_range(node)
@@ -263,16 +305,12 @@ local function field_symbol_at(list, y, x, container)
 end
 
 local function node_at(view, y, x)
-   local found
-   ast_walk.walk(view.ast, {
-      ["*"] = function(node)
-         if found == nil and NAME_KINDS[node.kind] and node.tk and node.y == y and
-            x >= node.x and x < node.x + #node.tk and node.tk:match("^[%a_][%w_]*$") then
-            found = node
-         end
-      end,
-   })
-   return found
+   for _, node in ipairs(index_of(view).names_by_line[y] or {}) do
+      if x >= node.x and x < node.x + #node.tk and node.tk:match("^[%a_][%w_]*$") then
+         return node
+      end
+   end
+   return nil
 end
 
 
@@ -283,7 +321,7 @@ function references.resolve_target(view, normalize, y, x)
 
    if node == nil then
 
-      local container, field = field_symbol_at(view.symbols, y, x)
+      local container, field = field_symbol_at(view.get_symbols(), y, x)
       if container then
          return {
             kind = "field",

@@ -1,4 +1,4 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local math = _tl_compat and _tl_compat.math or math; local _tl_math_maxinteger = math.maxinteger or math.pow(2, 53); local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.language_feature"
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local math = _tl_compat and _tl_compat.math or math; local _tl_math_maxinteger = math.maxinteger or math.pow(2, 53); local pcall = _tl_compat and _tl_compat.pcall or pcall; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.language_feature"
 
 local handler_helper = require("teal_language_server.handlers.handler_helper")
 local DocumentManager = require("teal_language_server.analysis.document_manager")
@@ -9,10 +9,13 @@ local ast_walk = require("teal_language_server.analysis.diagnostics.ast_walk")
 local inlay_hints = require("teal_language_server.analysis.inlay_hints")
 local completion = require("teal_language_server.analysis.completion")
 local semantic = require("teal_language_server.analysis.semantic")
+local references = require("teal_language_server.analysis.references")
+local symbols = require("teal_language_server.analysis.symbols")
 local Document = require("teal_language_server.analysis.document")
 local LspReaderWriter = require("teal_language_server.lsp.reader_writer")
 local LspEventsManager = require("teal_language_server.lsp.events_manager")
 local lsp = require("teal_language_server.lsp.protocol")
+local Uri = require("teal_language_server.util.uri")
 local logging = require("teal_language_server.logging")
 local class = require("teal_language_server.util.class")
 local tl = require("tl")
@@ -458,6 +461,40 @@ function LanguageFeatureHandlers:_on_signature_help(params, id)
    self._lsp_reader_writer:send_rpc(id, output)
 end
 
+
+
+
+
+
+
+function LanguageFeatureHandlers:_declaration_doc(doc, pos, type_info)
+   local normalize = function(p) return self._server_state:absolute_path(p) end
+   local loader = function(p) return handler_helper.load_symbols(self._document_manager, p) end
+   local function doc_at(file, y)
+      file = (file == nil or file == "") and doc.uri.path or normalize(file)
+
+      local open_doc = self._document_manager:get(Uri.uri_from_path(file))
+      local tokens = open_doc and open_doc:get_tokens() or doc:_tokens_of_file(file)
+      return tokens and semantic.doc_comment(tokens, y)
+   end
+   local ok, target = pcall(references.resolve_target, handler_helper.view(doc), normalize, pos.line + 1, pos.character + 1)
+   if not ok or target == nil then
+      return nil
+   end
+   local decls = references.declarations(target, loader)
+   for _, decl in ipairs(decls) do
+      local text = doc_at(decl.file, decl.y)
+      if text then
+         return text
+      end
+   end
+   if #decls == 0 and (target).kind == "field" and type_info and
+      type_info.t == tl.typecodes.FUNCTION and type_info.y then
+      return doc_at(type_info.file, type_info.y)
+   end
+   return nil
+end
+
 function LanguageFeatureHandlers:_on_hover(params, id)
    local pos = handler_helper.byte_position(self._document_manager, params)
    logger:trace("Received request for hover at position: %s", pos)
@@ -512,6 +549,10 @@ function LanguageFeatureHandlers:_on_hover(params, id)
    logger:debug("Successfully found type_info: %s", type_info)
 
    local type_str = lsp_formatter.show_type(node_info, type_info, doc)
+   local documentation = self:_declaration_doc(doc, pos, type_info)
+   if documentation then
+      type_str.value = type_str.value .. "\n\n" .. documentation
+   end
    self._lsp_reader_writer:send_rpc(id, {
       contents = type_str,
       range = node_range,

@@ -8,7 +8,7 @@ A language server for the [Teal language](https://github.com/teal-language/tl)
 
 * Diagnostics (`textDocument/publishDiagnostics`): compiler errors and warnings plus lint rules, with rule codes, configurable severities and suppression comments (see [Configuration](#configuration))
 * Completion (`textDocument/completion`), also while the current statement is unfinished: record fields and `:` methods of the receiver's type (including call results and generic instantiations), visible names ranked locals before globals before keywords, type names in type annotations, missing fields in record constructors, enum values inside strings where an enum is expected (arguments, declarations, assignments, comparisons, constructor fields), `require("...")` module names; type details, signatures and snippet placeholders when the editor supports them. Nothing is offered in comments, strings or new names
-* Hover (`textDocument/hover`)
+* Hover (`textDocument/hover`): type or signature, plus the documentation comment written above the declaration
 * Signature help (`textDocument/signatureHelp`), with the active parameter highlighted anywhere in the call, including unfinished and nested calls
 * Go to definition / type definition (`textDocument/definition`, `textDocument/typeDefinition`)
 * Find references and document highlight (`textDocument/references`, `textDocument/documentHighlight`): locals, globals, and record fields and methods across open files

@@ -65,7 +65,8 @@ local record references
       report: tl.TypeReport
       -- declaration position (1-based) of `name` visible at 0-based (y, x)
       declaration_of: function(name: string, y: integer, x: integer): integer, integer
-      symbols: {symbols.Symbol}
+      -- the document's outline (computed on first use)
+      get_symbols: function(): {symbols.Symbol}
    end
 
    -- loads the outline of a file that may not be open (for field declarations)
@@ -132,20 +133,61 @@ local function expr_type(view: View, node: AstNode): tl.TypeInfo
    return type_at(view, node.y, node.x)
 end
 
--- Per-view index of parents, built lazily.
-local parents_cache: {AstNode:{AstNode:AstNode}} = setmetatable({}, { __mode = "k" })
+-- Per-AST indexes, built lazily in one walk and kept as long as the AST
+-- (one document version) lives: each node's parent, and the name nodes of
+-- each line in walk order.
+local record AstIndex
+   parents: {AstNode:AstNode}
+   names_by_line: {integer:{AstNode}}
+end
+local index_cache: {AstNode:AstIndex} = setmetatable({}, { __mode = "k" })
+
+local function index_of(view: View): AstIndex
+   local cached = index_cache[view.ast]
+   if cached then return cached end
+   local index: AstIndex = { parents = {}, names_by_line = {} }
+   local parents = index.parents
+   local names = index.names_by_line
+   -- a plain traversal: neither index needs ast_walk's source-order visit
+   local seen: {AstNode:boolean} = {}
+   local function visit(node: AstNode, parent: AstNode)
+      if seen[node] then
+         return
+      end
+      seen[node] = true
+      parents[node] = parent
+      if NAME_KINDS[node.kind] and node.tk and node.y then
+         local row = names[node.y]
+         if row == nil then
+            row = {}
+            names[node.y] = row
+         end
+         table.insert(row, node)
+      end
+      for _, v in pairs(node as {any:any}) do
+         if ast_walk.is_node(v) then
+            visit(v as AstNode, node)
+         elseif type(v) == "table" and (v as {string:any}).typename == nil then
+            for _, item in ipairs(v as {any}) do
+               if ast_walk.is_node(item) then
+                  visit(item as AstNode, node)
+               end
+            end
+         end
+      end
+   end
+   if view.ast then
+      visit(view.ast, nil)
+   end
+   for _, row in pairs(names) do
+      table.sort(row, function(a: AstNode, b: AstNode): boolean return a.x < b.x end)
+   end
+   index_cache[view.ast] = index
+   return index
+end
 
 local function parents_of(view: View): {AstNode:AstNode}
-   local cached = parents_cache[view.ast]
-   if cached then return cached end
-   local parents: {AstNode:AstNode} = {}
-   ast_walk.walk(view.ast, {
-      ["*"] = function(node: AstNode, parent: AstNode)
-         parents[node] = parent
-      end,
-   })
-   parents_cache[view.ast] = parents
-   return parents
+   return index_of(view).parents
 end
 
 local function name_range(node: AstNode): integer, integer, integer, integer
@@ -263,16 +305,12 @@ local function field_symbol_at(list: {symbols.Symbol}, y: integer, x: integer, c
 end
 
 local function node_at(view: View, y: integer, x: integer): AstNode
-   local found: AstNode
-   ast_walk.walk(view.ast, {
-      ["*"] = function(node: AstNode)
-         if found == nil and NAME_KINDS[node.kind] and node.tk and node.y == y
-            and x >= node.x and x < node.x + #node.tk and node.tk:match("^[%a_][%w_]*$") then
-            found = node
-         end
-      end,
-   })
-   return found
+   for _, node in ipairs(index_of(view).names_by_line[y] or {}) do
+      if x >= node.x and x < node.x + #node.tk and node.tk:match("^[%a_][%w_]*$") then
+         return node
+      end
+   end
+   return nil
 end
 
 -- Resolves what is under the cursor (1-based y, x) in `view`.
@@ -283,7 +321,7 @@ function references.resolve_target(view: View, normalize: references.PathNormali
 
    if node == nil then
       -- a field declaration inside a record body has no AST node of its own
-      local container, field = field_symbol_at(view.symbols, y, x)
+      local container, field = field_symbol_at(view.get_symbols(), y, x)
       if container then
          return {
             kind = "field",

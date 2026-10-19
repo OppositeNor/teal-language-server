@@ -24,16 +24,17 @@ Each milestone is a vertical slice with the same parts:
 
 | S5 (P2) | **One classifier for definition and references** (was N2) | Definition asks `references.resolve_target` and the new `references.declarations` first, with full name ranges; methods give both their declaration and their implementation | `navigation_agreement_test` fails on `e682270` |
 
-Suite after S1–S5: **152 tests, 149 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
+| S6 (P1) | **Documentation comments in hover** (was N3) | `semantic.doc_comment` reads the comment block that tl's lexer attaches to the declaration's first token; the declaration comes from `references.declarations` | `tests/hover_docs_test.lua` |
+
+Suite after S1–S6: **155 tests, 152 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
 
 ## Next (in priority order)
 
-### N3 (P1): hover documentation from comments
+### N3 (P1): documentation in completion items
 
-tl tokens carry comments attached to the following token. Show the comment block directly above a
-declaration (local, function, record field) in hover and in completion `documentation`.
-
-* Tests: the comment is shown; an unrelated comment separated by a blank line is not.
+Hover shows declaration comments (S6). Completion items could carry them too, through
+`completionItem/resolve` so that the list stays cheap: the item's `data` holds the candidate's
+declaration, as typescript-language-server's `cacheId` does.
 
 ### N4 (P2): cross-file references and rename for exported fields
 

@@ -280,4 +280,49 @@ function semantic.enclosing_call(tokens: {tl.Token}, y: integer, x: integer): tl
    return nil, 0, false
 end
 
+-- Text of a comment without its delimiters: `--[[ … ]]` / `--[==[ … ]==]`
+-- blocks or `--` / `---` line comments.
+local function comment_body(text: string): string
+   local level = text:match("^%-%-%[(=*)%[")
+   if level then
+      local body = text:sub(5 + #level, -(3 + #level))
+      return (body:gsub("^[ \t]*\n?", ""):gsub("%s+$", ""))
+   end
+   return (text:gsub("^%-%-%-?", ""):gsub("^ ", ""):gsub("%s+$", ""))
+end
+
+-- The documentation comment of a declaration on line `y`: the contiguous
+-- block of comments that sit on their own lines directly above it. tl's
+-- lexer attaches comments to the following token, so they are read from the
+-- first token of line `y`. A trailing comment of the previous statement, a
+-- block separated by a blank line and `tls-` directives are not documentation.
+-- Returns nil when there is none.
+function semantic.doc_comment(tokens: {tl.Token}, y: integer): string
+   local i = ast_walk.token_index_at(tokens, y, 0) + 1
+   local first = tokens[i]
+   if first == nil or first.y ~= y or first.comments == nil then
+      return nil
+   end
+   local prev = tokens[i - 1]
+   local parts: {string} = {}
+   local expected_end = y - 1
+   for k = #first.comments, 1, -1 do
+      local c = first.comments[k]
+      local _, newlines = c.text:gsub("\n", "")
+      if c.y + newlines ~= expected_end or (prev and prev.y == c.y) or c.text:match("^%-%-%s*tls%-") then
+         break
+      end
+      table.insert(parts, 1, comment_body(c.text))
+      expected_end = c.y - 1
+   end
+   if #parts == 0 then
+      return nil
+   end
+   local text = table.concat(parts, "\n")
+   if text:match("^%s*$") then
+      return nil
+   end
+   return text
+end
+
 return semantic

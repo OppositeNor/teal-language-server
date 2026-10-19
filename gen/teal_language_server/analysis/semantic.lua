@@ -1,4 +1,4 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local math = _tl_compat and _tl_compat.math or math; local table = _tl_compat and _tl_compat.table or table
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local math = _tl_compat and _tl_compat.math or math; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table
 
 
 
@@ -278,6 +278,51 @@ function semantic.enclosing_call(tokens, y, x)
       scanned = scanned + 1
    end
    return nil, 0, false
+end
+
+
+
+local function comment_body(text)
+   local level = text:match("^%-%-%[(=*)%[")
+   if level then
+      local body = text:sub(5 + #level, -(3 + #level))
+      return (body:gsub("^[ \t]*\n?", ""):gsub("%s+$", ""))
+   end
+   return (text:gsub("^%-%-%-?", ""):gsub("^ ", ""):gsub("%s+$", ""))
+end
+
+
+
+
+
+
+
+function semantic.doc_comment(tokens, y)
+   local i = ast_walk.token_index_at(tokens, y, 0) + 1
+   local first = tokens[i]
+   if first == nil or first.y ~= y or first.comments == nil then
+      return nil
+   end
+   local prev = tokens[i - 1]
+   local parts = {}
+   local expected_end = y - 1
+   for k = #first.comments, 1, -1 do
+      local c = first.comments[k]
+      local _, newlines = c.text:gsub("\n", "")
+      if c.y + newlines ~= expected_end or (prev and prev.y == c.y) or c.text:match("^%-%-%s*tls%-") then
+         break
+      end
+      table.insert(parts, 1, comment_body(c.text))
+      expected_end = c.y - 1
+   end
+   if #parts == 0 then
+      return nil
+   end
+   local text = table.concat(parts, "\n")
+   if text:match("^%s*$") then
+      return nil
+   end
+   return text
 end
 
 return semantic

@@ -103,7 +103,9 @@ function handler_helper.view(doc)
       declaration_of = function(name, y, x)
          return doc:symbol_declaration_position(name, y, x)
       end,
-      symbols = doc:get_symbols(),
+      get_symbols = function()
+         return doc:get_symbols()
+      end,
    }
 end
 

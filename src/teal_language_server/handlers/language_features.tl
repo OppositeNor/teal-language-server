@@ -9,10 +9,13 @@ local ast_walk <const> = require("teal_language_server.analysis.diagnostics.ast_
 local inlay_hints <const> = require("teal_language_server.analysis.inlay_hints")
 local completion <const> = require("teal_language_server.analysis.completion")
 local semantic <const> = require("teal_language_server.analysis.semantic")
+local references <const> = require("teal_language_server.analysis.references")
+local symbols <const> = require("teal_language_server.analysis.symbols")
 local Document <const> = require("teal_language_server.analysis.document")
 local LspReaderWriter <const> = require("teal_language_server.lsp.reader_writer")
 local LspEventsManager <const> = require("teal_language_server.lsp.events_manager")
 local lsp <const> = require("teal_language_server.lsp.protocol")
+local Uri <const> = require("teal_language_server.util.uri")
 local logging <const> = require("teal_language_server.logging")
 local class <const> = require("teal_language_server.util.class")
 local tl <const> = require("tl")
@@ -458,6 +461,40 @@ function LanguageFeatureHandlers:_on_signature_help(params: lsp.Method.Params, i
    self._lsp_reader_writer:send_rpc(id, output as {string:any})
 end
 
+-- The documentation comment of the declaration the identifier at the byte
+-- position `pos` refers to, found with the same resolver as definition and
+-- references. Declarations in files that are not open are read from disk.
+-- A function declared on a module table (`function M.f`), for which the
+-- resolver lists no declaration, is found at its function type's position,
+-- which tl records at that statement.
+function LanguageFeatureHandlers:_declaration_doc(doc: Document, pos: lsp.Position, type_info: tl.TypeInfo): string
+   local normalize = function(p: string): string return self._server_state:absolute_path(p) end
+   local loader = function(p: string): {symbols.Symbol} return handler_helper.load_symbols(self._document_manager, p) end
+   local function doc_at(file: string, y: integer): string
+      file = (file == nil or file == "") and doc.uri.path or normalize(file)
+      -- an open buffer's text wins over the file on disk
+      local open_doc = self._document_manager:get(Uri.uri_from_path(file))
+      local tokens = open_doc and open_doc:get_tokens() or doc:_tokens_of_file(file)
+      return tokens and semantic.doc_comment(tokens, y)
+   end
+   local ok, target = pcall(references.resolve_target, handler_helper.view(doc), normalize, pos.line + 1, pos.character + 1)
+   if not ok or target == nil then
+      return nil
+   end
+   local decls = references.declarations(target as references.Target, loader)
+   for _, decl in ipairs(decls) do
+      local text = doc_at(decl.file, decl.y)
+      if text then
+         return text
+      end
+   end
+   if #decls == 0 and (target as references.Target).kind == "field" and type_info
+      and type_info.t == tl.typecodes.FUNCTION and type_info.y then
+      return doc_at(type_info.file, type_info.y)
+   end
+   return nil
+end
+
 function LanguageFeatureHandlers:_on_hover(params: lsp.Method.Params, id: integer): nil
    local pos <const> = handler_helper.byte_position(self._document_manager, params)
    logger:trace("Received request for hover at position: %s", pos)
@@ -512,6 +549,10 @@ function LanguageFeatureHandlers:_on_hover(params: lsp.Method.Params, id: intege
    logger:debug("Successfully found type_info: %s", type_info)
 
    local type_str <const> = lsp_formatter.show_type(node_info, type_info, doc)
+   local documentation = self:_declaration_doc(doc, pos, type_info)
+   if documentation then
+      type_str.value = type_str.value .. "\n\n" .. documentation
+   end
    self._lsp_reader_writer:send_rpc(id, {
       contents = type_str,
       range = node_range,

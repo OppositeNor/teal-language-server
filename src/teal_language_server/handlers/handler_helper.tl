@@ -103,7 +103,9 @@ function handler_helper.view(doc: Document): references.View
       declaration_of = function(name: string, y: integer, x: integer): integer, integer
          return doc:symbol_declaration_position(name, y, x)
       end,
-      symbols = doc:get_symbols(),
+      get_symbols = function(): {symbols.Symbol}
+         return doc:get_symbols()
+      end,
    }
 end
 
