@@ -325,4 +325,37 @@ function semantic.doc_comment(tokens, y)
    return text
 end
 
+
+
+
+function semantic.required_module_at(tokens, y, x)
+   local i = ast_walk.token_index_at(tokens, y, x)
+   local t = tokens[i]
+   if t == nil or t.y ~= y or x >= t.x + #t.tk then
+      return nil
+   end
+   local str
+   if t.kind == "string" then
+      local prev = tokens[i - 1]
+      if prev and prev.tk == "(" then
+         prev = tokens[i - 2]
+      end
+      if prev and prev.kind == "identifier" and prev.tk == "require" then
+         str = t
+      end
+   elseif t.kind == "identifier" and t.tk == "require" then
+      local nxt = tokens[i + 1]
+      if nxt and nxt.tk == "(" then
+         nxt = tokens[i + 2]
+      end
+      if nxt and nxt.kind == "string" then
+         str = nxt
+      end
+   end
+   if str == nil then
+      return nil
+   end
+   return str.tk:match("^[\"'](.*)[\"']$")
+end
+
 return semantic

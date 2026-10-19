@@ -14,6 +14,9 @@ local logging <const> = require("teal_language_server.logging")
 local class <const> = require("teal_language_server.util.class")
 local references <const> = require("teal_language_server.analysis.references")
 local symbols <const> = require("teal_language_server.analysis.symbols")
+local semantic <const> = require("teal_language_server.analysis.semantic")
+local tl <const> = require("tl")
+local lfs <const> = require("lfs")
 
 local logger = logging.get_logger(_module_name)
 
@@ -76,6 +79,9 @@ function DefinitionHandlers:_send_location(id: integer, doc: Document, file: str
    local target_pos: lsp.Position
    if target_doc then
       target_pos = target_doc:to_lsp_position(y, x)
+   elseif lfs.attributes(file_uri.path, "mode") ~= "file" then
+      -- e.g. tl's built-in declarations ("stdlib.d.tl"), which are not a file
+      return false
    else
       local line_text = position.read_file_line(file_uri.path, y - 1)
       target_pos = lsp.position(y - 1, position.byte_to_utf16(line_text, x - 1))
@@ -130,10 +136,34 @@ function DefinitionHandlers:_semantic_definition(doc: Document, pos: lsp.Positio
    return out
 end
 
+-- The file a `require("name")` under the cursor loads, found by tl's own
+-- module search (package.path from tlconfig.lua, open buffers first), or nil.
+function DefinitionHandlers:_required_module_location(doc: Document, pos: lsp.Position): {string:any}
+   local name = semantic.required_module_at(doc:get_tokens(), pos.line + 1, pos.character + 1)
+   if name == nil then
+      return nil
+   end
+   local found, fd = tl.search_module(name, true)
+   if fd then
+      fd:close()
+   end
+   if found == nil then
+      return nil
+   end
+   local path = self._server_state:absolute_path(found)
+   local start = lsp.position(0, 0)
+   return { uri = Uri.tostring(Uri.uri_from_path(Path(path).value)), range = { start = start, ["end"] = start } }
+end
+
 function DefinitionHandlers:_on_definition(params: lsp.Method.Params, id: integer): nil
    local pos <const> = handler_helper.byte_position(self._document_manager, params)
    local current = handler_helper.get_document(self._document_manager, params)
    if current then
+      local module_location = self:_required_module_location(current, pos)
+      if module_location then
+         self._lsp_reader_writer:send_rpc(id, module_location)
+         return
+      end
       local locations = self:_semantic_definition(current, pos)
       if locations then
          -- a single declaration as a Location, several as Location[]

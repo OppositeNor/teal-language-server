@@ -249,23 +249,19 @@ tested.test("type definition of a jumps to its record type declaration", functio
     })
 end)
 
--- Line 11: "TestType_mt = {", TestType_mt at col 0. typeDefinition resolves the
--- type `metatable<TestType>` and jumps into the stdlib definition (a different file).
-tested.test("type definition of TestType_mt jumps to the metatable type in stdlib", function()
+-- Line 11: "TestType_mt = {", TestType_mt at col 0. Its type `metatable<TestType>`
+-- is declared in tl's built-in declarations, which tl 0.24.8 parses from an
+-- embedded string under the name "stdlib.d.tl": there is no file to open, so
+-- there is no location (rather than a path that does not exist).
+tested.test("type definition of TestType_mt has no location in tl's built-in declarations", function()
     local response = client:get_type_definition(uri, 11, 0)
     local result = response and response.result
 
     tested.assert({
-        given = "type definition result",
-        should = "have a result",
-        expected = true,
-        actual = is_table(result),
-    })
-    tested.assert({
-        given = "type definition result uri",
-        should = "point to a different file (the stdlib, not the open document)",
+        given = "type definition of a stdlib type",
+        should = "return no location",
         expected = false,
-        actual = is_table(result) and (result.uri == uri),
+        actual = is_table(result),
     })
 end)
 

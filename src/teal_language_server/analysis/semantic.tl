@@ -325,4 +325,37 @@ function semantic.doc_comment(tokens: {tl.Token}, y: integer): string
    return text
 end
 
+-- The module name of a `require("name")` / `require "name"` call when the
+-- cursor (tl coordinates) is on its string or on the `require` name; nil
+-- otherwise.
+function semantic.required_module_at(tokens: {tl.Token}, y: integer, x: integer): string
+   local i = ast_walk.token_index_at(tokens, y, x)
+   local t = tokens[i]
+   if t == nil or t.y ~= y or x >= t.x + #t.tk then
+      return nil
+   end
+   local str: tl.Token
+   if t.kind == "string" then
+      local prev = tokens[i - 1]
+      if prev and prev.tk == "(" then
+         prev = tokens[i - 2]
+      end
+      if prev and prev.kind == "identifier" and prev.tk == "require" then
+         str = t
+      end
+   elseif t.kind == "identifier" and t.tk == "require" then
+      local nxt = tokens[i + 1]
+      if nxt and nxt.tk == "(" then
+         nxt = tokens[i + 2]
+      end
+      if nxt and nxt.kind == "string" then
+         str = nxt
+      end
+   end
+   if str == nil then
+      return nil
+   end
+   return str.tk:match("^[\"'](.*)[\"']$")
+end
+
 return semantic
