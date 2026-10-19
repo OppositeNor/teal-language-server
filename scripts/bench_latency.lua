@@ -118,9 +118,59 @@ local function bench(n)
       rss and ("%d"):format(rss // 1024) or "?"))
 end
 
+-- References of a record field used in `n` closed files of a workspace: the
+-- first request type checks the candidate files (cold), the next ones reuse
+-- them (warm).
+local function bench_workspace(n)
+   local project = require("tests.helpers.project")
+   local files = {
+      ["lib.tl"] = "local record Item\n   weight: number\nend\nlocal M = { Item = Item }\nfunction M.make(): Item return { weight = 1 } end\nreturn M\n",
+   }
+   for i = 1, n do
+      local body = { 'local lib = require("lib")' }
+      for j = 1, 20 do
+         body[#body + 1] = ("local it%d = lib.make()\nlocal w%d = it%d.weight + %d"):format(j, j, j, i)
+      end
+      files[("user%03d.tl"):format(i)] = table.concat(body, "\n") .. "\n"
+   end
+   files["main.tl"] = 'local lib = require("lib")\nlocal it = lib.make()\nprint(it.weight)\n'
+   local dir = project.create(files)
+   local client = LspClient.new(server, {})
+   client:initialize("file://" .. dir)
+   local uri = "file://" .. dir .. "/main.tl"
+   client:open_document(uri, files["main.tl"])
+   client:wait_for_notification("textDocument/publishDiagnostics", 120000)
+   local samples = {}
+   local count = 0
+   for i = 1, 6 do
+      local start = now_ms()
+      local r = client:wait_for_response(client:request("textDocument/references", {
+         textDocument = { uri = uri }, position = { line = 2, character = 9 },
+         context = { includeDeclaration = true },
+      }), 120000)
+      samples[i] = now_ms() - start
+      count = type(r.result) == "table" and #r.result or -1
+   end
+   local warm = {}
+   for i = 2, #samples do warm[#warm + 1] = samples[i] end
+   local rss = rss_kb(client._pid)
+   client:shutdown()
+   project.remove(dir)
+   print(("| %4d | %6d | %8.1f | %s | %s |"):format(n, count, samples[1],
+      ("%.1f / %.1f"):format(percentile(warm, 0.5), percentile(warm, 0.95)), rss and ("%d"):format(rss // 1024) or "?"))
+end
+
 print(("server: %s, %d iterations per size; latencies in ms (P50 / P95)"):format(server, iterations))
 print("| lines | open (ms) | completion, broken buffer | completion, valid buffer | hover | definition | RSS (MB) |")
 print("|---|---|---|---|---|---|---|")
 for _, n in ipairs({ 10, 100, 500 }) do
    bench(n)
+end
+
+print()
+print("references of a record field used in closed workspace files (1 cold request, then 5 warm)")
+print("| closed files | locations | cold (ms) | warm P50 / P95 (ms) | RSS (MB) |")
+print("|---|---|---|---|---|")
+for _, n in ipairs({ 10, 50, 150 }) do
+   bench_workspace(n)
 end

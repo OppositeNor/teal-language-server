@@ -28,27 +28,15 @@ Each milestone is a vertical slice with the same parts:
 
 | S7 (P1) | **Documentation in completion items** (was N3) | `completionItem/resolve` looks up the item's declaration comment: locals by declaration line, fields and methods through `references.declarations`, module-table functions at their function type | `hover_docs_test` "completionItem/resolve …" |
 
-Suite after S1–S7: **156 tests, 153 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
+| S8 (P2) | **Workspace-wide references and rename** (was N4) | Whole-word pre-filter over the workspace index; closed candidates type checked as transient Documents (cached per mtime and env, `references_budget_ms`); hits confirmed by the resolver; rename edits closed files (`version: null`) and refuses incomplete searches. The test client now uses an empty workspace root instead of `/tmp`. | `tests/workspace_references_test.lua` fails on `c5ac304`; `scripts/bench_latency.lua` workspace scenario |
+
+Suite after S1–S8: **160 tests, 157 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
 
 ## Next (in priority order)
 
-### N4 (P2): cross-file references and rename for exported fields
-
-Today, references for globals and fields cover open files only. Plan:
-
-1. Use the workspace index to pre-filter files whose tokens contain the name. This is cheap: lex
-   only, as TypeScript's name table does.
-2. Type check only those files in a temporary env.
-3. Confirm each hit by identity with the existing resolver, as rust-analyzer's `FindUsages` does
-   (text search, then semantic confirmation).
-4. Rename must stay refused when a candidate file fails to check.
-
-* Risk: medium (cost, env isolation).
-* Measure with `scripts/bench_latency.lua`, extended to a multi-file workspace.
-
 ### N5 (P2): auto-import completion
 
-* Depends on N4's module/export index.
+* Builds on the workspace index used by S8.
 * Offer exported names of workspace modules not yet required.
 * The edit inserts `local m = require("…")` after the existing requires. It is applied only when
   the name is not already bound in scope; check this with `semantic.visible_symbols`.

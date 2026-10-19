@@ -15,10 +15,19 @@ local IS_WINDOWS = package.config:sub(1, 1) == "\\"
 -- On Windows, file:///tmp resolves to the relative path "tmp" (the URI parser
 -- strips the leading "/"), which doesn't exist. Use the system temp directory
 -- instead, which is guaranteed to exist on any Windows installation.
+--
+-- Elsewhere, each client gets a fresh empty directory: the server scans the
+-- workspace root (workspace symbols, cross-file references), and all of /tmp
+-- would make results depend on unrelated files.
 local function get_root_uri()
     if IS_WINDOWS then
         local temp = os.getenv("TEMP") or os.getenv("TMP") or "C:\\Windows\\Temp"
         return "file:///" .. temp:gsub("\\", "/")
+    end
+    local dir = os.tmpname()
+    os.remove(dir)
+    if require("lfs").mkdir(dir) then
+        return "file://" .. dir
     end
     return "file:///tmp"
 end

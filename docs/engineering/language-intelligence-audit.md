@@ -222,11 +222,16 @@ Definition now resolves through `references.resolve_target` and `references.decl
 rust-analyzer's goto-definition and find-usages share `NameRefClass`.
 `tests/navigation_agreement_test.lua` asserts that every definition is among the reported references.
 
-### F6 (open): cross-file navigation scope
+### F6 (fixed in S8): cross-file navigation scope
 
-References and rename for globals and record fields cover open files only. Teal has no cheap
-cross-file index of uses without type checking each file. The workspace index
-(`workspace_index.tl`) holds outlines only. Details: `feature-matrix.md`.
+References and rename for globals and record fields covered open files only. They now also search
+workspace files that are not open, in two steps:
+
+1. a whole-word text filter over the workspace index;
+2. a type check of each candidate, then semantic confirmation of each hit.
+
+Limits: a time budget, and files over 256 KiB are skipped. Rename refuses when the search cannot
+be shown to be complete.
 
 ## 6. What `tl` exposes, and what would need upstream work
 

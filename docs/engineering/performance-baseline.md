@@ -87,6 +87,21 @@ Hover relative to valid-buffer completion at 1102 lines:
 
 The remaining hover/definition overhead is the index build on the first request after an edit.
 
+**Workspace references (S8)**, 2026-10-19
+
+A shared module `lib.tl` (record `Item` with field `weight`) and `n` closed files, each using
+`weight` 20 times; only `main.tl` is open. One cold `textDocument/references` request (it type
+checks the candidate files), then 5 warm ones (cached checks).
+
+| closed files | locations | cold (ms) | warm P50 / P95 (ms) | RSS (MB) |
+|---|---|---|---|---|
+|   10 |  203 |  34.2 | 5.5 / 9.3 | 16 |
+|   50 | 1003 | 157.6 | 31.8 / 42.2 | 44 |
+|  150 | 3003 | 516.4 | 91.3 / 140.9 | 112 |
+
+All uses were found (n × 20 + 3). The cold cost grows linearly, at about 3.4 ms per closed file of
+41 lines, and stays within the default 1.5 s budget at 150 files.
+
 ## Reading the numbers
 
 * **Valid buffers: no measurable change.** P50 differences are within run-to-run noise. The new

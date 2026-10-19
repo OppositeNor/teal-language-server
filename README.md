@@ -11,8 +11,8 @@ A language server for the [Teal language](https://github.com/teal-language/tl)
 * Hover (`textDocument/hover`): type or signature, plus the documentation comment written above the declaration
 * Signature help (`textDocument/signatureHelp`), with the active parameter highlighted anywhere in the call, including unfinished and nested calls
 * Go to definition / type definition (`textDocument/definition`, `textDocument/typeDefinition`)
-* Find references and document highlight (`textDocument/references`, `textDocument/documentHighlight`): locals, globals, and record fields and methods across open files
-* Rename (`textDocument/prepareRename`, `textDocument/rename`)
+* Find references and document highlight (`textDocument/references`, `textDocument/documentHighlight`): locals, globals, and record fields and methods across the workspace, including files that are not open
+* Rename (`textDocument/prepareRename`, `textDocument/rename`) across the workspace; refused when the server cannot prove every use was found
 * Code actions (`textDocument/codeAction`): quick fixes (remove unused import, prefix unused variable with `_`, annotate an implicit `any`, disable a rule for a line) and "Fix all" (`source.fixAll.teal`)
 * Document outline (`textDocument/documentSymbol`) and workspace symbol search (`workspace/symbol`)
 * Inlay hints (`textDocument/inlayHint`) showing inferred types of unannotated locals
@@ -99,6 +99,7 @@ return {
          report_unused_directives = "warn",  -- flag suppression comments that suppress nothing
          inlay_hints = true,
          diagnostics_delay_ms = 150,         -- debounce for diagnostics after edits
+         references_budget_ms = 1500,        -- time for checking closed files in one references/rename search
       },
    },
 }

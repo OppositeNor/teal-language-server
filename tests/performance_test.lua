@@ -151,8 +151,10 @@ tested.test("$/cancelRequest cancels a request that has not been handled yet", f
     })
     client:notify("$/cancelRequest", { id = ids[1] })
 
-    local cancelled = client:wait_for_response(ids[1])
-    local answered = client:wait_for_response(ids[2])
+    -- under --coverage, checking this buffer alone takes about 12-14 s
+    -- (82 ms without), close to the default timeout
+    local cancelled = client:wait_for_response(ids[1], 60000)
+    local answered = client:wait_for_response(ids[2], 60000)
     tested.assert({ given = "the cancelled request", should = "fail with RequestCancelled (-32800)", expected = -32800, actual = cancelled.error and math.tointeger(cancelled.error.code) or 0 })
     tested.assert({ given = "the other request", should = "be answered normally", expected = true, actual = answered.error == nil and answered.result ~= nil })
 end)

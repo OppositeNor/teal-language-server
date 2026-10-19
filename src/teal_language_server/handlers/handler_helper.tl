@@ -92,9 +92,15 @@ function handler_helper.load_symbols(document_manager: DocumentManager, path: st
 end
 
 -- What the symbol resolver (analysis/references) needs from a document.
-function handler_helper.view(doc: Document): references.View
+-- `semantics_only` skips the diagnostics (lint rules) and only type checks,
+-- for documents that are analyzed just to be searched.
+function handler_helper.view(doc: Document, semantics_only?: boolean): references.View
    -- make sure the document has been type checked so its by_pos data is current
-   doc:get_problems()
+   if semantics_only then
+      doc:ensure_semantics()
+   else
+      doc:get_problems()
+   end
    return {
       path = doc.uri.path,
       tokens = doc:get_tokens(),

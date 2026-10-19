@@ -182,8 +182,6 @@ tested.test("record field references and rename across open files, including tab
     tested.assert({ given = "renamed mod.tl", should = "rename declaration, self use and constructor", expected = lines(
         "local record Vec", "   px: number", "   y: number", "   length: function(self): number", "end", "function Vec:length(): number",
         "   return self.px + self.y", "end", "function Vec.origin(): Vec", "   return { px = 0, y = 0 }", "end", "return Vec"), actual = new_mod })
-    local msg = client:wait_for_notification("window/showMessage", 5000)
-    tested.assert({ given = "cross-file rename", should = "warn that closed files are not updated", expected = true, actual = msg.message:find("not open", 1, true) ~= nil })
     project.remove(dir)
 end)
 

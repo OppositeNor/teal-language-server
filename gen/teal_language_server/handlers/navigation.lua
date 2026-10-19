@@ -1,4 +1,4 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local pairs = _tl_compat and _tl_compat.pairs or pairs; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.navigation"
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local io = _tl_compat and _tl_compat.io or io; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local pairs = _tl_compat and _tl_compat.pairs or pairs; local pcall = _tl_compat and _tl_compat.pcall or pcall; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.navigation"
 
 
 
@@ -18,10 +18,28 @@ local lsp = require("teal_language_server.lsp.protocol")
 local logging = require("teal_language_server.logging")
 local class = require("teal_language_server.util.class")
 local json = require("cjson")
+local lfs = require("lfs")
+local tl = require("tl")
+local uv = require("luv")
 
 local logger = logging.get_logger(_module_name)
 
-local NavigationHandlers = {}
+local NavigationHandlers = { ClosedFile = {}, Scope = {} }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -35,6 +53,7 @@ function NavigationHandlers:__init(lsp_events_manager, lsp_reader_writer, server
    self._lsp_reader_writer = lsp_reader_writer
    self._server_state = server_state
    self._document_manager = document_manager
+   self._closed = {}
 end
 
 local function pos_lt(a, b)
@@ -94,20 +113,106 @@ function NavigationHandlers:_view(doc)
    return handler_helper.view(doc)
 end
 
-function NavigationHandlers:_views_for(target, current)
-   if target.kind == "local" or target.kind == "type" then
-      return { self:_view(current) }
+
+
+function NavigationHandlers:_closed_doc(path)
+   local mtime = lfs.attributes(path, "modification")
+   local env = self._server_state:get_env()
+   local cached = self._closed[path]
+   if cached and cached.mtime == mtime and cached.env == env then
+      return cached.doc
    end
-   local views = {}
+   local fd = io.open(path, "rb")
+   if not fd then
+      self._closed[path] = nil
+      return nil
+   end
+   local text = fd:read("*a")
+   fd:close()
+   local doc = Document(Uri.uri_from_path(path), text, 0, self._lsp_reader_writer, self._server_state)
+   self._closed[path] = { doc = doc, mtime = mtime, env = env }
+   return doc
+end
+
+
+
+
+local MAX_CLOSED_FILES = 200
+local MAX_CLOSED_FILE_BYTES = 256 * 1024
+
+
+
+function NavigationHandlers:_search_budget_ms()
+   local externals = (self._server_state.config or {}).externals
+   local ours = externals and (externals).teal_language_server
+   local value = type(ours) == "table" and (ours).references_budget_ms
+   if type(value) == "number" and value >= 0 then
+      return value
+   end
+   return 1500
+end
+
+
+
+
+
+
+function NavigationHandlers:_scope_for(target, current)
+   if target.kind == "local" or target.kind == "type" then
+      return { views = { self:_view(current) }, incomplete = {} }
+   end
+   local scope = { views = {}, incomplete = {} }
    local paths = {}
    for path in pairs(self._document_manager.docs) do
       table.insert(paths, path)
    end
    table.sort(paths)
    for _, path in ipairs(paths) do
-      table.insert(views, self:_view(self._document_manager.docs[path]))
+      table.insert(scope.views, self:_view(self._document_manager.docs[path]))
    end
-   return views
+
+   local index = self._server_state:get_workspace_index()
+   workspace_index.refresh(index, function(path)
+      return self._document_manager:open_content(path)
+   end)
+   local pattern = "%f[%w_]" .. target.name .. "%f[^%w_]"
+   local closed = {}
+   for path, entry in pairs(index.entries) do
+      if entry.mtime ~= -1 and not self._document_manager.docs[path] then
+         for _, line in ipairs(entry.lines) do
+            if line:find(pattern) then
+               table.insert(closed, path)
+               break
+            end
+         end
+      end
+   end
+   table.sort(closed)
+
+
+   local deadline = uv.hrtime() + self:_search_budget_ms() * 1e6
+   local env = self._server_state:get_env()
+   for i, path in ipairs(closed) do
+      local cached = self._closed[path]
+      local is_cached = cached ~= nil and cached.env == env and
+      cached.mtime == lfs.attributes(path, "modification")
+      local too_big = (lfs.attributes(path, "size") or 0) > MAX_CLOSED_FILE_BYTES
+      if i > MAX_CLOSED_FILES or too_big or (not is_cached and uv.hrtime() > deadline) then
+         table.insert(scope.incomplete, path)
+      else
+         local doc = self:_closed_doc(path)
+         local ok, view = pcall(handler_helper.view, doc, true)
+         if doc and ok and doc:ensure_semantics() then
+            table.insert(scope.views, view)
+            if doc:is_recovered() then
+               table.insert(scope.incomplete, path)
+            end
+         else
+            table.insert(scope.incomplete, path)
+         end
+      end
+   end
+   return scope
 end
 
 
@@ -122,10 +227,24 @@ function NavigationHandlers:_target(params)
    return target, doc
 end
 
+
+
 function NavigationHandlers:_find(target, doc)
    local normalize = function(p) return self:_normalize(p) end
    local loader = function(p) return self:_load_symbols(p) end
-   return references.find(self:_views_for(target, doc), target, normalize, loader)
+   local scope = self:_scope_for(target, doc)
+   local locations, unresolved = references.find(scope.views, target, normalize, loader)
+   return locations, unresolved, scope.incomplete
+end
+
+
+function NavigationHandlers:_in_workspace(path)
+   local root = self._server_state.teal_project_root_dir
+   if root == nil then
+      return false
+   end
+   local prefix = root.value:gsub("/$", "") .. "/"
+   return path:sub(1, #prefix) == prefix
 end
 
 function NavigationHandlers:_lsp_range(file, y, x, yend, xend)
@@ -193,13 +312,11 @@ function NavigationHandlers:_rename_plan(params)
    if target.kind == "type" then
       return nil, nil, nil, "Renaming types is not supported yet: uses in type annotations are not tracked"
    end
-   if target.kind == "field" then
-      local owner_file = references.owner_file(target)
-      if owner_file and not self:_open_doc(owner_file) then
-         return nil, nil, nil, string.format("Cannot rename '%s': it is declared in %s, which is not open", target.name, owner_file)
-      end
+   local locations, unresolved, incomplete = self:_find(target, doc)
+   if #incomplete > 0 then
+      return nil, nil, nil, string.format("Cannot safely rename '%s': %s could not be fully analyzed (syntax errors, or too many files to check)",
+      target.name, incomplete[1])
    end
-   local locations, unresolved = self:_find(target, doc)
    if #unresolved > 0 then
       local u = unresolved[1]
       return nil, nil, nil, string.format("Cannot safely rename '%s': the table constructor key at %s:%d:%d could not be typed; annotate the table's type and retry",
@@ -211,7 +328,7 @@ function NavigationHandlers:_rename_plan(params)
          if loc.kind == "decl" then declared = true end
       end
       if not declared then
-         return nil, nil, nil, string.format("Cannot rename '%s': it is not declared in an open file", target.name)
+         return nil, nil, nil, string.format("Cannot rename '%s': it is not declared in the workspace", target.name)
       end
    end
    if target.kind == "field" and references.owner_file(target) then
@@ -224,8 +341,8 @@ function NavigationHandlers:_rename_plan(params)
       end
    end
    for _, loc in ipairs(locations) do
-      if not self:_open_doc(loc.file) then
-         return nil, nil, nil, string.format("Cannot rename '%s': %s is not open", target.name, loc.file)
+      if not self:_open_doc(loc.file) and not self:_in_workspace(loc.file) then
+         return nil, nil, nil, string.format("Cannot rename '%s': %s is outside the workspace", target.name, loc.file)
       end
    end
    return target, doc, locations, nil
@@ -273,8 +390,13 @@ function NavigationHandlers:_on_rename(params, id)
       local changes = {}
       for _, file in ipairs(files) do
          local d = self:_open_doc(file)
+
+         local version = json.null
+         if d then
+            version = d.version
+         end
          table.insert(changes, {
-            textDocument = { uri = Uri.tostring(d.uri), version = d.version },
+            textDocument = { uri = Uri.tostring(Uri.uri_from_path(file)), version = version },
             edits = by_file[file],
          })
       end
@@ -287,13 +409,6 @@ function NavigationHandlers:_on_rename(params, id)
       edit = { changes = changes }
    end
    self._lsp_reader_writer:send_rpc(id, edit)
-
-   if target.kind ~= "local" then
-      self._lsp_reader_writer:send_rpc_notification("window/showMessage", {
-         type = lsp.message_type.Info,
-         message = string.format("Renamed '%s' in open files; references in files that are not open were not updated.", target.name),
-      })
-   end
 end
 
 function NavigationHandlers:_on_workspace_symbol(params, id)

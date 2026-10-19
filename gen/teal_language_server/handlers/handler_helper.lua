@@ -92,9 +92,15 @@ function handler_helper.load_symbols(document_manager, path)
 end
 
 
-function handler_helper.view(doc)
 
-   doc:get_problems()
+
+function handler_helper.view(doc, semantics_only)
+
+   if semantics_only then
+      doc:ensure_semantics()
+   else
+      doc:get_problems()
+   end
    return {
       path = doc.uri.path,
       tokens = doc:get_tokens(),
