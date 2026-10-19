@@ -5,6 +5,7 @@ local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 th
 
 
 local tl = require("tl")
+local ast_walk = require("teal_language_server.analysis.diagnostics.ast_walk")
 local engine = require("teal_language_server.analysis.diagnostics.engine")
 local problem = require("teal_language_server.analysis.diagnostics.problem")
 local rule_registry = require("teal_language_server.analysis.diagnostics.rule_registry")
@@ -25,7 +26,7 @@ function linter.lint_text(code, filename, settings, env_options)
    }
    if #input.lex_errors == 0 then
       local parse_errors = {}
-      local ast = tl.parse_program(tokens, parse_errors, filename)
+      local ast = ast_walk.parse_program(tokens, parse_errors, filename)
       input.ast = ast
       input.parse_errors = parse_errors
       if #parse_errors == 0 then

@@ -101,7 +101,7 @@ function NavigationHandlers:_load_symbols(path)
    fd:close()
    local tokens = tl.lex(text, path)
    local errs = {}
-   local ast = tl.parse_program(tokens, errs, path)
+   local ast = ast_walk.parse_program(tokens, errs, path)
    local ok, result = pcall(symbols.document_symbols, tokens, ast)
    return ok and result or {}
 end

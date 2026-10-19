@@ -109,7 +109,7 @@ end
 local function parse_file(path: string, text: string): {symbols.Symbol}
    local tokens = tl.lex(text, path)
    local errs: {tl.Error} = {}
-   local ast = tl.parse_program(tokens, errs, path)
+   local ast = ast_walk.parse_program(tokens, errs, path)
    local ok, result = pcall(symbols.document_symbols, tokens, ast as ast_walk.AstNode)
    if not ok then
       logger:warning("Could not index %s: %s", path, tostring(result))

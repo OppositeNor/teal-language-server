@@ -9,6 +9,7 @@ local tl = require("tl")
 local LspClient = require("tests.helpers.lsp_client")
 local completion = require("teal_language_server.analysis.completion")
 local semantic = require("teal_language_server.analysis.semantic")
+local ast_walk = require("teal_language_server.analysis.diagnostics.ast_walk")
 
 local function lines(...)
     return table.concat({ ... }, "\n")
@@ -56,7 +57,8 @@ tested.test("completion context: member access, annotations and declarations", f
         { "for i| = 1, 2 do end", "none" },
         { "local a, b|", "none" },
         { "local n = 12|", "none" },
-        { "local s = 'abc|'", "none", nil, "string" },
+        -- a literal: its expected type (string here) decides, see the enum tests
+        { "local s = 'abc|'", "literal", nil, "string" },
         { "-- comment |", "none", nil, "comment" },
         { "  name|: string", "none", nil, "name" },
         { "local v = ab|", "scope" },
@@ -75,6 +77,35 @@ tested.test("completion context: member access, annotations and declarations", f
     tested.assert({ given = "cursor inside a member name", should = "use the typed part as prefix", expected = "na", actual = ctx.prefix })
     ctx = context_at("local _ = v:|scale(2)")
     tested.assert({ given = "a member followed by an argument list", should = "know a call follows", expected = true, actual = ctx.followed_by_call })
+end)
+
+tested.test("string literal contexts know where their expected type comes from", function()
+    local cases = {
+        { 'f("|")', "argument" },
+        { 'f(1, "o|n")', "argument" },
+        { 'f("|', "argument" },
+        { 'local m: Mode = "|"', "expression" },
+        { 'd.mode = "|"', "expression" },
+        { 'if m == "|" then end', "expression" },
+        { 'local o: Opts = { mode = "|" }', "constructor_field" },
+    }
+    for _, c in ipairs(cases) do
+        local ctx = context_at(c[1], "string")
+        tested.assert({ given = c[1], should = "be a literal context", expected = "literal", actual = ctx.kind })
+        tested.assert({ given = c[1], should = "take the expected type from the " .. c[2], expected = c[2], actual = ctx.literal_source })
+    end
+    local ctx = context_at('f(1, "o|n")', "string")
+    tested.assert({ given = "a partially typed literal", should = "replace the whole content", expected = "7-9", actual = ctx.content_x .. "-" .. ctx.content_xend })
+    ctx = context_at('local t = { "a|" }', "string")
+    tested.assert({ given = "an array constructor entry", should = "offer nothing", expected = "none", actual = ctx.kind })
+end)
+
+tested.test("parsing keeps the caller's tokens unchanged", function()
+    -- tl's parser inserts a synthetic ")" while recovering from `f("o`
+    local tokens = tl.lex('f("o\n', "mut.tl")
+    local before = #tokens
+    ast_walk.parse_program(tokens, {}, "mut.tl")
+    tested.assert({ given = "an unterminated call", should = "leave the token list as lexed", expected = before, actual = #tokens })
 end)
 
 tested.test("expression keys locate where tl records each receiver's type", function()
@@ -372,6 +403,58 @@ tested.test("signature help on unfinished and higher-order calls", function()
     label = signature(text .. "local function id<T>(x: T): T return x end\nid(take)(make(), ", 9, 17)
     tested.assert({ given = "calling a generic call's result", should = "show the instantiated function type", expected = true,
         actual = label ~= nil and label:find("Point", 1, true) ~= nil and label:find("integer", 1, true) ~= nil })
+end)
+
+local ENUMS = lines(
+    "local enum Mode",                                       -- 0
+    "   \"on\"",                                             -- 1
+    "   \"off\"",                                            -- 2
+    "end",                                                   -- 3
+    "local enum Size",                                       -- 4
+    "   \"big\"",                                            -- 5
+    "   \"small\"",                                          -- 6
+    "end",                                                   -- 7
+    "local record Opts",                                     -- 8
+    "   mode: Mode",                                         -- 9
+    "   name: string",                                       -- 10
+    "end",                                                   -- 11
+    "local function set(m: Mode, s: Size | integer) end",    -- 12
+    "local record Dev",                                      -- 13
+    "   mode: Mode",                                         -- 14
+    "end",                                                   -- 15
+    "function Dev:switch(m: Mode) end",                      -- 16
+    "local d: Dev = { mode = \"on\" }",                       -- 17
+    "")
+
+tested.test("string literals complete the values of their expected enum type", function()
+    local function labels(text, character)
+        local items, list = complete(ENUMS .. text, 18, character, nil)
+        local out = {}
+        for _, item in ipairs(list) do
+            table.insert(out, item.label)
+        end
+        table.sort(out)
+        return table.concat(out, ","), items
+    end
+    local cases = {
+        { 'set("")', 5, "off,on", "a Mode argument" },
+        { 'set("on", "")', 11, "big,small", "an argument of type Size | integer" },
+        { 'd:switch("")', 10, "off,on", "a method argument (self is implicit)" },
+        { 'local m: Mode = ""', 17, "off,on", "a declaration with a Mode annotation" },
+        { 'd.mode = ""', 10, "off,on", "an assignment to a Mode field" },
+        { 'if d.mode == "" then end', 14, "off,on", "a comparison with a Mode value" },
+        { 'local o: Opts = { mode = "" }', 26, "off,on", "a Mode field in a constructor" },
+        { 'set("o', 6, "off,on", "an unterminated literal" },
+        { 'print("")', 7, "", "a parameter of type any" },
+        { 'local o: Opts = { name = "" }', 26, "", "a string field" },
+    }
+    for _, c in ipairs(cases) do
+        tested.assert({ given = c[4], should = "offer " .. (c[3] == "" and "nothing" or c[3]), expected = c[3], actual = (labels(c[1], c[2])) })
+    end
+    local _, items = labels('set("o")', 6)
+    local edit = items.on and items.on.textEdit
+    tested.assert({ given = 'set("o|")', should = "replace the literal's content",
+        expected = "18:5-18:6", actual = edit and string.format("%d:%d-%d:%d", edit.range.start.line, edit.range.start.character, edit.range["end"].line, edit.range["end"].character) })
 end)
 
 return tested

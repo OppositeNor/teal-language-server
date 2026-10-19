@@ -5,6 +5,7 @@
 -- overwriting the shared env's type report for open documents.
 
 local tl <const> = require("tl")
+local ast_walk <const> = require("teal_language_server.analysis.diagnostics.ast_walk")
 local engine <const> = require("teal_language_server.analysis.diagnostics.engine")
 local problem <const> = require("teal_language_server.analysis.diagnostics.problem")
 local rule_registry <const> = require("teal_language_server.analysis.diagnostics.rule_registry")
@@ -25,7 +26,7 @@ function linter.lint_text(code: string, filename: string, settings: rule_registr
    }
    if #input.lex_errors == 0 then
       local parse_errors: {tl.Error} = {}
-      local ast = tl.parse_program(tokens, parse_errors, filename)
+      local ast = ast_walk.parse_program(tokens, parse_errors, filename)
       input.ast = ast
       input.parse_errors = parse_errors
       if #parse_errors == 0 then

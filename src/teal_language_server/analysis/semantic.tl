@@ -229,4 +229,55 @@ function semantic.type_at_key(report: tl.TypeReport, file: string, y: integer, x
    return ti
 end
 
+-- Finds the call whose argument list contains the cursor: scans the lexer
+-- tokens backwards from the cursor to the innermost unmatched "(" that follows
+-- a callable expression. Returns that "(" token, the number of top-level
+-- commas between it and the cursor (the active argument), and whether the
+-- call is a method call through ":".
+function semantic.enclosing_call(tokens: {tl.Token}, y: integer, x: integer): tl.Token, integer, boolean
+   -- last token starting before the cursor
+   local idx = ast_walk.token_index_at(tokens, y, x - 1)
+   local depth = 0
+   local commas = 0
+   local scanned = 0
+   while idx >= 1 and scanned < 5000 do
+      local t = tokens[idx]
+      local tk = t.tk
+      if tk == ")" or tk == "}" or tk == "]" then
+         depth = depth + 1
+      elseif tk == "{" or tk == "[" then
+         if depth == 0 then
+            -- the cursor is inside a table constructor (or index) that is itself
+            -- an argument: its commas are not argument separators
+            commas = 0
+         else
+            depth = depth - 1
+         end
+      elseif tk == "(" then
+         if depth == 0 then
+            local prev = tokens[idx - 1]
+            local before_prev = tokens[idx - 2]
+            local callable = prev ~= nil and (prev.kind == "identifier" or prev.tk == ")" or prev.tk == "]" or prev.tk == "self")
+            -- `function name(` is a definition, not a call
+            if callable and before_prev and before_prev.tk == "function" then
+               return nil, 0, false
+            end
+            if callable then
+               local method = before_prev ~= nil and before_prev.tk == ":"
+               return t, commas, method
+            end
+            return nil, 0, false
+         end
+         depth = depth - 1
+      elseif tk == "," and depth == 0 then
+         commas = commas + 1
+      elseif depth == 0 and (tk == "local" or tk == "function" or tk == "end" or tk == "then" or tk == "do" or tk == "return") then
+         return nil, 0, false
+      end
+      idx = idx - 1
+      scanned = scanned + 1
+   end
+   return nil, 0, false
+end
+
 return semantic

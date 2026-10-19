@@ -86,6 +86,33 @@ local completion = { Context = {}, Candidate = {} }
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 completion.tiers = {
    constructor_field = 9,
    local_value = 10,
@@ -283,17 +310,96 @@ local function is_annotation_colon(tokens, colon)
    return false
 end
 
+local function is_quote(c)
+   return c == "\"" or c == "'"
+end
+
+
+
+
+local function literal_context(tokens, idx, cy, cx, ctx)
+   local t = tokens[idx]
+   if t == nil or t.y ~= cy or not (t.kind == "string" or t.kind == "$ERR$") or not is_quote(t.tk:sub(1, 1)) then
+      return false
+   end
+   local quote = t.tk:sub(1, 1)
+
+   local first_line = t.tk:match("^[^\n]*")
+   local closed = t.kind == "string" and #first_line >= 2 and first_line:sub(-1) == quote
+   local content_xend = closed and (t.x + #first_line - 1) or (t.x + #first_line)
+   if cx <= t.x or cx > content_xend then
+      return false
+   end
+   ctx.literal = t
+   ctx.content_x = t.x + 1
+   ctx.content_xend = content_xend
+
+   local before = tokens[idx - 1]
+   if before == nil then
+      return true
+   end
+   if before.tk == "(" or before.tk == "," then
+      local open = enclosing_open(tokens, idx - 1)
+      if open and tokens[open].tk == "(" then
+         local paren, commas, method = semantic.enclosing_call(tokens, t.y, t.x)
+         if paren and paren == tokens[open] then
+            ctx.literal_source = "argument"
+            ctx.call_paren = open
+            ctx.arg_index = commas
+            ctx.method_call = method
+         end
+      end
+   elseif before.tk == "=" then
+      local name = tokens[idx - 2]
+      local lead = tokens[idx - 3]
+      local open = enclosing_open(tokens, idx - 1)
+      if name and name.kind == "identifier" and lead and (lead.tk == "{" or lead.tk == "," or lead.tk == ";") and
+         open and tokens[open].tk == "{" then
+         ctx.literal_source = "constructor_field"
+         ctx.table_open = tokens[open]
+         ctx.field = name.tk
+      else
+
+         local i = idx - 2
+         while i >= 1 and tokens[i].y == t.y and tokens[i].tk ~= "local" and tokens[i].tk ~= "global" and tokens[i].tk ~= "=" do
+            i = i - 1
+         end
+         if tokens[i] and (tokens[i].tk == "local" or tokens[i].tk == "global") and tokens[i + 1] and tokens[i + 1].kind == "identifier" then
+            local n = tokens[i + 1]
+            ctx.literal_source = "expression"
+            ctx.target = { y = n.y, x = n.x, ret_depth = 0, first = i + 1, last = i + 1, has_call = false }
+         else
+            ctx.target = semantic.expression_key(tokens, idx - 2)
+            ctx.target_assigned = true
+            ctx.literal_source = ctx.target and "expression" or nil
+         end
+      end
+   elseif before.tk == "==" or before.tk == "~=" then
+      ctx.target = semantic.expression_key(tokens, idx - 2)
+      ctx.literal_source = ctx.target and "expression" or nil
+   end
+   return true
+end
+
 
 
 
 function completion.context(tokens, cy, cx, syntax, line_after)
    local ctx = { kind = "scope", prefix = "", prefix_y = cy, prefix_x = cx }
-   if syntax == "comment" or syntax == "string" or syntax == "name" then
+   if syntax == "comment" or syntax == "name" then
       ctx.kind = "none"
       return ctx
    end
 
    local idx = token_before(tokens, cy, cx)
+   if literal_context(tokens, idx, cy, cx, ctx) then
+      ctx.kind = ctx.literal_source and "literal" or "none"
+      return ctx
+   end
+   if syntax == "string" then
+      ctx.kind = "none"
+      return ctx
+   end
    local t = tokens[idx]
    if t and t.y == cy and token_end_x(t) >= cx then
 
@@ -574,6 +680,58 @@ function completion.constructor_candidates(report, table_type, present)
 
          local tier = any_self_method(report, ti, table_type, false) and completion.tiers.member_method or completion.tiers.constructor_field
          table.insert(out, { label = name, kind = "field", type_info = ti, tier = tier })
+      end
+   end
+   return out
+end
+
+
+
+function completion.enum_values(report, ti)
+   local out = {}
+   local seen = {}
+   local function add(t, depth)
+      if t == nil or depth > 8 then
+         return
+      end
+      if t.t == tl.typecodes.ENUM and t.enums then
+         for _, v in ipairs(t.enums) do
+            if not seen[v] then
+               seen[v] = true
+               table.insert(out, v)
+            end
+         end
+      elseif t.t == tl.typecodes.UNION and t.types then
+         for _, id in ipairs(t.types) do
+            add(semantic.resolve(report, id), depth + 1)
+         end
+      end
+   end
+   add(ti, 0)
+   table.sort(out)
+   return out
+end
+
+
+
+function completion.parameter_types(report, fn, index)
+   local out = {}
+   if fn == nil then
+      return out
+   end
+   local candidates = { fn }
+   if fn.t == tl.typecodes.POLY then
+      candidates = {}
+      for _, id in ipairs(fn.types or {}) do
+         table.insert(candidates, semantic.resolve(report, id))
+      end
+   end
+   for _, f in ipairs(candidates) do
+      if f and f.t == tl.typecodes.FUNCTION and f.args then
+         local arg = f.args[index] or (f.vararg and f.args[#f.args])
+         if arg then
+            table.insert(out, semantic.resolve(report, arg[1]))
+         end
       end
    end
    return out

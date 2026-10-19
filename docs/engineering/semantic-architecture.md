@@ -54,6 +54,10 @@ Diagnostics stay staged as before: lex errors, else parse errors, else type erro
 lint rules. Type errors of a recovered parse are mostly follow-on noise, so they are not published.
 Semantic queries and diagnostics read the same snapshot.
 
+The parser always runs on a **copy** of the token list (`ast_walk.parse_program`). When it
+recovers from errors, tl inserts synthetic tokens into the list it is given, and the server's
+tokens must stay exactly what the lexer produced.
+
 Invariant: **after `ensure_semantics`, every `by_pos` / `symbols_by_file` entry for the file
 describes the current text, or there is none.** tl replaces `by_pos[file]` at the start of each
 check (`TypeReporter:get_collector`) and `symbols_by_file[file]` at its end (`store_result`).
@@ -77,6 +81,11 @@ so queries there return nothing; they do not guess.
 | `type_declaration_positions(ast)` | AST → set of `"y:x"` of names declared as types (`local_type` / `global_type`) | type-position completion, item kinds |
 | `expression_key(tokens, last)` | token index → where tl records that postfix expression's type: name at the name, `e.f`/`e:f` at the operator, `e[k]` at `[`, `(e)` at `(`, a call as callee + one return level | member completion |
 | `type_at_key(report, file, y, x, ret_depth)` | key → `TypeInfo`, or nil when tl recorded nothing or the return is a bare type variable | member completion |
+| `enclosing_call(tokens, y, x)` | position → the innermost call's `(`, active argument index, whether it is a `:` call | signature help, literal completion |
+
+Caveat: at an **assignment target**, `by_pos` holds the assigned value's type, not the target's
+declared type. Literal completion therefore resolves `x = …` / `t.f = …` targets through
+declarations (the scope walk plus record fields).
 
 `Document:type_of_expression(key)` adds one fallback on top of `type_at_key`. When a key that
 contains a call misses, it type-checks a **speculative copy** of the text with the expression
@@ -108,6 +117,17 @@ current snapshot on every request, and nothing holds an identity across versions
    | `local` / `global` | declaration (the keywords `function`, `record`, … only) |
    | `local function`, `for`, a record field name, a number, a comment, a string, a lexer error | none |
    | anything else | scope |
+
+   Inside a quoted string, the context is a **literal** when its expected type has a known source:
+
+   | Token before the string | Expected type |
+   |---|---|
+   | `(` / `,` of a call | the callee's parameter |
+   | `=` | the declared target, or a constructor field |
+   | `==` / `~=` | the other operand |
+
+   Only enum values (of an enum, or of every enum in a union) are offered. The edit replaces the
+   string's content.
 
    An annotation colon is told apart from a method access by token shape: a declared name after
    `local` or `global`, a parameter inside a definition's parameter list, or a `)` that closes such

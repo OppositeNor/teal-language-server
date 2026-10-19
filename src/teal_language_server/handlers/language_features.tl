@@ -135,24 +135,26 @@ local function type_kind_to_lsp(ti: tl.TypeInfo): integer
    return lsp.completion_item_kind.Class
 end
 
--- Resolves the receiver of a member completion. The by_pos entry recorded by
+-- Resolves the type of an expression (a member completion's receiver, the
+-- target a literal is assigned to). The by_pos entry recorded by
 -- tl is the answer; a plain name chain (`a.b.c`) whose position tl skipped
 -- (for example in a statement the parser dropped) is resolved through the
 -- current scope's symbols and record fields instead, which is still tl's own
 -- data. Anything else yields nil: no members are guessed.
 --
--- In a type position (`local x: m.T`) by_pos holds the whole annotation at
--- its start, not the qualifier, so only the name chain applies there.
-local function completion_receiver(doc: Document, ctx: completion.Context): tl.TypeInfo
-   if not ctx.in_type then
-      local ti = doc:type_of_expression(ctx.receiver)
+-- `names_only` skips by_pos where it does not hold the expression's declared
+-- type: in a type position (`local x: m.T`) it holds the whole annotation at
+-- its start, and at an assignment target the assigned value's type.
+local function expression_type(doc: Document, key: semantic.ExprKey, names_only: boolean): tl.TypeInfo
+   if not names_only then
+      local ti = doc:type_of_expression(key)
       if ti then
          return ti
       end
    end
    local tokens = doc:get_tokens()
    local names: {string} = {}
-   for i = ctx.receiver.first, ctx.receiver.last do
+   for i = key.first, key.last do
       local t = tokens[i]
       if t.kind == "identifier" then
          table.insert(names, t.tk)
@@ -160,8 +162,63 @@ local function completion_receiver(doc: Document, ctx: completion.Context): tl.T
          return nil
       end
    end
-   local first = tokens[ctx.receiver.first]
+   local first = tokens[key.first]
    return doc:type_information_for_tokens(names, first.y - 1, first.x - 1)
+end
+
+-- Types a string literal is expected to have, from where tl recorded them.
+local function literal_expected_types(doc: Document, ctx: completion.Context): {tl.TypeInfo}
+   local report = doc:get_type_report()
+   local tokens = doc:get_tokens()
+   if ctx.literal_source == "argument" then
+      local callee = semantic.expression_key(tokens, ctx.call_paren - 1)
+      local fn = callee and doc:type_of_expression(callee)
+      -- a method call through ":" passes the receiver as the first argument
+      local index = ctx.arg_index + 1 + (ctx.method_call and 1 or 0)
+      return completion.parameter_types(report, fn, index)
+   elseif ctx.literal_source == "expression" then
+      return { expression_type(doc, ctx.target, ctx.target_assigned) }
+   elseif ctx.literal_source == "constructor_field" then
+      local table_type = semantic.type_at_key(report, doc.uri.path, ctx.table_open.y, ctx.table_open.x, 0)
+      local field = table_type and table_type.fields and table_type.fields[ctx.field]
+      return { field and semantic.resolve(report, field) }
+   end
+   return {}
+end
+
+-- Enum values for a string literal with a known expected type. Each item
+-- replaces the literal's content, so the quotes the editor already
+-- inserted are kept.
+function LanguageFeatureHandlers:_literal_items(doc: Document, ctx: completion.Context): {any}
+   local report = doc:get_type_report()
+   local values: {string} = {}
+   local seen: {string:boolean} = {}
+   for _, ti in ipairs(literal_expected_types(doc, ctx)) do
+      for _, v in ipairs(completion.enum_values(report, ti)) do
+         if not seen[v] then
+            seen[v] = true
+            table.insert(values, v)
+         end
+      end
+   end
+   table.sort(values)
+   local y = ctx.literal.y
+   local range: lsp.Range = {
+      start = doc:to_lsp_position(y, ctx.content_x),
+      ["end"] = doc:to_lsp_position(y, ctx.content_xend),
+   }
+   local items: {any} = {}
+   for _, v in ipairs(values) do
+      table.insert(items, {
+         label = v,
+         kind = lsp.completion_item_kind.EnumMember,
+         -- clients filter on the text the edit replaces, i.e. the typed content
+         filterText = v,
+         sortText = string.format("%02d_%s", completion.tiers.member_field, v),
+         textEdit = { range = range, newText = v },
+      })
+   end
+   return items
 end
 
 function LanguageFeatureHandlers:_on_completion(params: lsp.Method.Params, id: integer): nil
@@ -187,11 +244,18 @@ function LanguageFeatureHandlers:_on_completion(params: lsp.Method.Params, id: i
       return
    end
 
+   if ctx.kind == "literal" then
+      local literal_items = self:_literal_items(doc, ctx)
+      setmetatable(literal_items, json.empty_array_mt as metatable<{any}>)
+      self._lsp_reader_writer:send_rpc(id, { isIncomplete = false, items = literal_items })
+      return
+   end
+
    local report = doc:get_type_report()
    local path = doc.uri.path
    local candidates: {completion.Candidate}
    if ctx.kind == "member" then
-      local receiver = completion_receiver(doc, ctx)
+      local receiver = expression_type(doc, ctx.receiver, ctx.in_type)
       if receiver == nil then
          logger:info("Completion receiver has no recorded type")
       end
@@ -241,57 +305,6 @@ function LanguageFeatureHandlers:_on_completion(params: lsp.Method.Params, id: i
       isIncomplete = false,
       items = items
    })
-end
-
--- Finds the call whose argument list contains the cursor: scans the lexer
--- tokens backwards from the cursor to the innermost unmatched "(" that follows
--- a callable expression. Returns that "(" token, the number of top-level
--- commas between it and the cursor (the active argument), and whether the
--- call is a method call through ":".
-local function enclosing_call(tokens: {tl.Token}, y: integer, x: integer): tl.Token, integer, boolean
-   -- last token starting before the cursor
-   local idx = ast_walk.token_index_at(tokens, y, x - 1)
-   local depth = 0
-   local commas = 0
-   local scanned = 0
-   while idx >= 1 and scanned < 5000 do
-      local t = tokens[idx]
-      local tk = t.tk
-      if tk == ")" or tk == "}" or tk == "]" then
-         depth = depth + 1
-      elseif tk == "{" or tk == "[" then
-         if depth == 0 then
-            -- the cursor is inside a table constructor (or index) that is itself
-            -- an argument: its commas are not argument separators
-            commas = 0
-         else
-            depth = depth - 1
-         end
-      elseif tk == "(" then
-         if depth == 0 then
-            local prev = tokens[idx - 1]
-            local before_prev = tokens[idx - 2]
-            local callable = prev ~= nil and (prev.kind == "identifier" or prev.tk == ")" or prev.tk == "]" or prev.tk == "self")
-            -- `function name(` is a definition, not a call
-            if callable and before_prev and before_prev.tk == "function" then
-               return nil, 0, false
-            end
-            if callable then
-               local method = before_prev ~= nil and before_prev.tk == ":"
-               return t, commas, method
-            end
-            return nil, 0, false
-         end
-         depth = depth - 1
-      elseif tk == "," and depth == 0 then
-         commas = commas + 1
-      elseif depth == 0 and (tk == "local" or tk == "function" or tk == "end" or tk == "then" or tk == "do" or tk == "return") then
-         return nil, 0, false
-      end
-      idx = idx - 1
-      scanned = scanned + 1
-   end
-   return nil, 0, false
 end
 
 -- Byte ranges [start, end) of the top-level parameters in a signature label
@@ -350,7 +363,7 @@ function LanguageFeatureHandlers:_on_signature_help(params: lsp.Method.Params, i
    -- locate the call around the cursor; fall back to "cursor right after (" for
    -- code the lexer cannot make sense of
    local tokens = doc:get_tokens()
-   local paren, active_arg, method_call = enclosing_call(tokens, pos.line + 1, pos.character + 1)
+   local paren, active_arg, method_call = semantic.enclosing_call(tokens, pos.line + 1, pos.character + 1)
    local lookup: lsp.Position
    if paren then
       lookup = lsp.position(paren.y - 1, paren.x - 1)

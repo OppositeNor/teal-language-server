@@ -197,6 +197,18 @@ tl leaves some `self: R` parameter types as an unresolved nominal (no `ref`), so
 matches the first parameter to the receiver by type *name*. Two different records with the same
 name in different scopes could be confused. This is pre-existing behavior, now documented in code.
 
+### F7 (high): the parser rewrote the server's token list
+
+When it recovers from an error such as an unterminated call `f("o`, `tl.parse_program` *inserts
+synthetic tokens* (here a `)` of kind `keyword`) into the token array it is given. The Document
+passed its cached tokens. As a result, every token-based query that ran after a syntax error saw
+tokens that are not in the text: completion context, signature help, references and lint rules.
+Found while implementing string-literal completion: the cursor appeared to follow a `)`.
+
+Fix: `ast_walk.parse_program` parses a copy of the list. All five call sites use it: Document,
+speculative check, linter, workspace index, navigation. A regression test checks that the caller's
+list is unchanged.
+
 ### F6 (open): cross-file navigation scope
 
 References and rename for globals and record fields cover open files only. Teal has no cheap

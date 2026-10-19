@@ -20,22 +20,11 @@ Each milestone is a vertical slice with the same parts:
 | S1 (P0) | **Semantics for unfinished code** | `Document:ensure_semantics` type-checks the recovered AST for queries; diagnostics remain staged; the file's report entries are dropped when a check fails, so no stale positions are served | `tests/completion_context_test.lua`: 11 server-level tests failed on `498f664`; all pass now |
 | S2 (P1) | **Context-aware completion** | `analysis/semantic.tl` (scope walk with positions, type-declaration detection, token-based expression keys); `analysis/completion.tl` (context classification, valid candidates, tiers). Covers member, method, scope, type and qualified-type positions, record constructors, blockers, ranking, and no duplicate parentheses. A speculative parenthesized check finds generic and overloaded call results | Same file plus `completion_test` (a former expected failure now passes) and `ergonomics_test` |
 | S3 (P1) | **Signature help on the shared callee query** | The callee is located on tokens (`expression_key`) and typed through `type_of_expression`, so unfinished, nested and higher-order calls work | `completion_context_test` "signature help on unfinished and higher-order calls" |
+| S4 (P1) | **Expected-type completion of enum values in strings** (was N1) | `literal_context` classifies the string's position: argument, declaration, assignment, comparison or constructor field. The expected type comes from tl's report, using declared types for assignment targets, where tl records the assigned value instead. Also fixes F7: tl's parser inserted tokens into the server's token list | `completion_context_test`: literal and token-list tests fail on `44941bb` |
 
-Suite after S1–S3: **147 tests, 144 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
+Suite after S1–S4: **150 tests, 147 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
 
 ## Next (in priority order)
-
-### N1 (P1): expected-type completion for enum literals
-
-* **Goal**: `f("|")` where the parameter is an enum, `local m: Mode = "|"`, and `x == "|"` should
-  offer the enum's values.
-* **Semantic source**:
-  * argument position: `enclosing_call` + the callee type's `args[i]`;
-  * assignment: the declared type of the target from `by_pos`;
-  * comparison: the other operand's type.
-* **Risk**: low. Everything comes from tl's report.
-* **Reference**: TypeScript `getContextualType` in `tsc/internal/ls/completions.go`.
-* **Tests**: values offered; values not offered for a `string` parameter.
 
 ### N2 (P2): definition / references agreement test and anchor fix
 

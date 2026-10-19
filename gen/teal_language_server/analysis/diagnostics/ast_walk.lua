@@ -238,4 +238,16 @@ function ast_walk.token_at(tokens, y, x)
    return nil
 end
 
+
+
+
+
+function ast_walk.parse_program(tokens, errs, filename)
+   local copy = {}
+   for i, t in ipairs(tokens) do
+      copy[i] = t
+   end
+   return (tl.parse_program(copy, errs, filename))
+end
+
 return ast_walk

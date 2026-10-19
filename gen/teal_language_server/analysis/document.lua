@@ -139,9 +139,8 @@ end
 function Document:_get_ast(tokens)
    local cache = self._cache
    if not cache.ast then
-      local _
       cache.parse_errors = {}
-      cache.ast, _ = tl.parse_program(tokens, cache.parse_errors, self._uri.path)
+      cache.ast = ast_walk.parse_program(tokens, cache.parse_errors, self._uri.path)
       logger:debug("parse_prog errors: %d", #cache.parse_errors)
    end
    return cache.ast, cache.parse_errors
@@ -1066,7 +1065,7 @@ function Document:type_of_expression(key)
    local spec_name = self._uri.path .. "#speculative"
    local ok, err = pcall(function()
       local tks = tl.lex(text, spec_name)
-      local ast = tl.parse_program(tks, {}, spec_name)
+      local ast = ast_walk.parse_program(tks, {}, spec_name)
       tl.check(ast, spec_name, {
          feat_lax = is_lua(self._uri.path) and "on" or "off",
          feat_arity = "on",

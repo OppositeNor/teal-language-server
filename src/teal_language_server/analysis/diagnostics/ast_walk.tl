@@ -238,4 +238,16 @@ function ast_walk.token_at(tokens: {tl.Token}, y: integer, x: integer): tl.Token
    return nil
 end
 
+-- tl.parse_program, on a copy of the token list: when it recovers from a
+-- syntax error, tl's parser inserts synthetic tokens (e.g. a missing ")")
+-- into the list it is given, and callers keep using their tokens for
+-- positions and context afterwards.
+function ast_walk.parse_program(tokens: {tl.Token}, errs: {tl.Error}, filename: string): tl.Node
+   local copy: {tl.Token} = {}
+   for i, t in ipairs(tokens) do
+      copy[i] = t
+   end
+   return (tl.parse_program(copy, errs, filename))
+end
+
 return ast_walk

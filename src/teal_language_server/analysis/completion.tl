@@ -35,8 +35,21 @@ local record completion
       "constructor"
       -- the name of a new declaration: only keywords that may start one
       "declaration"
+      -- inside a string literal whose expected type is known: enum values
+      "literal"
       -- comment, string, number: nothing
       "none"
+   end
+
+   -- where the expected type of a string literal comes from
+   enum LiteralSource
+      -- an argument of the call opened at `call_paren`
+      "argument"
+      -- the target of `target = "…"` / `local target: T = "…"`, or the
+      -- other operand of `x == "…"`
+      "expression"
+      -- the value of field `field` in the constructor opened at `table_open`
+      "constructor_field"
    end
 
    enum SyntaxHint
@@ -62,6 +75,20 @@ local record completion
       -- constructor: the "{" token, and the keys already written
       table_open: tl.Token
       present_keys: {string:boolean}
+      -- literal: the string token, its content range (tl columns, end
+      -- exclusive, on the token's line) and where its expected type comes from
+      literal: tl.Token
+      content_x: integer
+      content_xend: integer
+      literal_source: LiteralSource
+      call_paren: integer
+      arg_index: integer
+      method_call: boolean
+      target: semantic.ExprKey
+      -- the target is assigned to: its declared type matters, and tl records
+      -- the assigned value's type at it instead
+      target_assigned: boolean
+      field: string
    end
 
    enum CandidateKind
@@ -283,17 +310,96 @@ local function is_annotation_colon(tokens: {tl.Token}, colon: integer): boolean
    return false
 end
 
+local function is_quote(c: string): boolean
+   return c == "\"" or c == "'"
+end
+
+-- The string-literal context at token `idx` (which contains the cursor), or
+-- nil when the cursor is not inside a short quoted string. Long strings
+-- (`[[…]]`) are never enum values in practice and are not handled.
+local function literal_context(tokens: {tl.Token}, idx: integer, cy: integer, cx: integer, ctx: completion.Context): boolean
+   local t = tokens[idx]
+   if t == nil or t.y ~= cy or not (t.kind == "string" or t.kind == "$ERR$") or not is_quote(t.tk:sub(1, 1)) then
+      return false
+   end
+   local quote = t.tk:sub(1, 1)
+   -- the first line of the token only (an unterminated string runs to EOF)
+   local first_line = t.tk:match("^[^\n]*")
+   local closed = t.kind == "string" and #first_line >= 2 and first_line:sub(-1) == quote
+   local content_xend = closed and (t.x + #first_line - 1) or (t.x + #first_line)
+   if cx <= t.x or cx > content_xend then
+      return false
+   end
+   ctx.literal = t
+   ctx.content_x = t.x + 1
+   ctx.content_xend = content_xend
+
+   local before = tokens[idx - 1]
+   if before == nil then
+      return true
+   end
+   if before.tk == "(" or before.tk == "," then
+      local open = enclosing_open(tokens, idx - 1)
+      if open and tokens[open].tk == "(" then
+         local paren, commas, method = semantic.enclosing_call(tokens, t.y, t.x)
+         if paren and paren == tokens[open] then
+            ctx.literal_source = "argument"
+            ctx.call_paren = open
+            ctx.arg_index = commas
+            ctx.method_call = method
+         end
+      end
+   elseif before.tk == "=" then
+      local name = tokens[idx - 2]
+      local lead = tokens[idx - 3]
+      local open = enclosing_open(tokens, idx - 1)
+      if name and name.kind == "identifier" and lead and (lead.tk == "{" or lead.tk == "," or lead.tk == ";")
+         and open and tokens[open].tk == "{" then
+         ctx.literal_source = "constructor_field"
+         ctx.table_open = tokens[open]
+         ctx.field = name.tk
+      else
+         -- `local name[: T] =`: the declared variable (tl records its type at the name)
+         local i = idx - 2
+         while i >= 1 and tokens[i].y == t.y and tokens[i].tk ~= "local" and tokens[i].tk ~= "global" and tokens[i].tk ~= "=" do
+            i = i - 1
+         end
+         if tokens[i] and (tokens[i].tk == "local" or tokens[i].tk == "global") and tokens[i + 1] and tokens[i + 1].kind == "identifier" then
+            local n = tokens[i + 1]
+            ctx.literal_source = "expression"
+            ctx.target = { y = n.y, x = n.x, ret_depth = 0, first = i + 1, last = i + 1, has_call = false }
+         else
+            ctx.target = semantic.expression_key(tokens, idx - 2)
+            ctx.target_assigned = true
+            ctx.literal_source = ctx.target and "expression" or nil
+         end
+      end
+   elseif before.tk == "==" or before.tk == "~=" then
+      ctx.target = semantic.expression_key(tokens, idx - 2)
+      ctx.literal_source = ctx.target and "expression" or nil
+   end
+   return true
+end
+
 -- Classifies the cursor position. `cy`/`cx` are tl coordinates of the
 -- character after the cursor; `syntax` is the tree-sitter hint for that spot;
 -- `line_after` is the rest of the line after the cursor.
 function completion.context(tokens: {tl.Token}, cy: integer, cx: integer, syntax: completion.SyntaxHint, line_after: string): completion.Context
    local ctx: completion.Context = { kind = "scope", prefix = "", prefix_y = cy, prefix_x = cx }
-   if syntax == "comment" or syntax == "string" or syntax == "name" then
+   if syntax == "comment" or syntax == "name" then
       ctx.kind = "none"
       return ctx
    end
 
    local idx = token_before(tokens, cy, cx)
+   if literal_context(tokens, idx, cy, cx, ctx) then
+      ctx.kind = ctx.literal_source and "literal" or "none"
+      return ctx
+   end
+   if syntax == "string" then
+      ctx.kind = "none"
+      return ctx
+   end
    local t = tokens[idx]
    if t and t.y == cy and token_end_x(t) >= cx then
       -- the cursor is inside or at the end of token t
@@ -574,6 +680,58 @@ function completion.constructor_candidates(report: tl.TypeReport, table_type: tl
          -- methods are normally implemented on the type, not per value
          local tier = any_self_method(report, ti, table_type, false) and completion.tiers.member_method or completion.tiers.constructor_field
          table.insert(out, { label = name, kind = "field", type_info = ti, tier = tier })
+      end
+   end
+   return out
+end
+
+-- The string values a value of type `ti` can take: an enum's values, or
+-- those of every enum in a union.
+function completion.enum_values(report: tl.TypeReport, ti: tl.TypeInfo): {string}
+   local out: {string} = {}
+   local seen: {string:boolean} = {}
+   local function add(t: tl.TypeInfo, depth: integer)
+      if t == nil or depth > 8 then
+         return
+      end
+      if t.t == tl.typecodes.ENUM and t.enums then
+         for _, v in ipairs(t.enums) do
+            if not seen[v] then
+               seen[v] = true
+               table.insert(out, v)
+            end
+         end
+      elseif t.t == tl.typecodes.UNION and t.types then
+         for _, id in ipairs(t.types) do
+            add(semantic.resolve(report, id), depth + 1)
+         end
+      end
+   end
+   add(ti, 0)
+   table.sort(out)
+   return out
+end
+
+-- Type of parameter `index` (1-based) of a function, POLY overloads
+-- included; a vararg function repeats its last parameter.
+function completion.parameter_types(report: tl.TypeReport, fn: tl.TypeInfo, index: integer): {tl.TypeInfo}
+   local out: {tl.TypeInfo} = {}
+   if fn == nil then
+      return out
+   end
+   local candidates: {tl.TypeInfo} = { fn }
+   if fn.t == tl.typecodes.POLY then
+      candidates = {}
+      for _, id in ipairs(fn.types or {}) do
+         table.insert(candidates, semantic.resolve(report, id))
+      end
+   end
+   for _, f in ipairs(candidates) do
+      if f and f.t == tl.typecodes.FUNCTION and f.args then
+         local arg = f.args[index] or (f.vararg and f.args[#f.args])
+         if arg then
+            table.insert(out, semantic.resolve(report, arg[1]))
+         end
       end
    end
    return out
