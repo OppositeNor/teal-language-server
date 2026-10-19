@@ -209,6 +209,16 @@ Fix: `ast_walk.parse_program` parses a copy of the list. All five call sites use
 speculative check, linter, workspace index, navigation. A regression test checks that the caller's
 list is unchanged.
 
+### F9 (medium, fixed in S10): coarse and incomplete dependency invalidation
+
+An edit to an open module re-checked **every** open document after the env rebuild, about 30 ms per
+open 331-line document. It also missed importers that reach the module through a module that is
+not open: `DocumentManager:dependents_of` looked at direct requires only. The importer then kept
+stale types until its own next edit.
+
+Now the transitive closure over `env.loaded` decides which documents are re-checked; the others are
+re-checked lazily.
+
 ### F8 (medium, fixed): definition and references disagreed
 
 Definition used its own lookup path: name → scope walk, field → the position of the field's

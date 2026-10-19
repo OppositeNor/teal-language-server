@@ -1,4 +1,4 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local pairs = _tl_compat and _tl_compat.pairs or pairs; local table = _tl_compat and _tl_compat.table or table; local _module_name = "analysis.document_manager"
+local _module_name = "analysis.document_manager"
 
 
 local ServerState = require("teal_language_server.server_state")
@@ -54,22 +54,6 @@ function DocumentManager:get(uri)
       return
    end
    return self._docs[uri.path]
-end
-
-
-function DocumentManager:dependents_of(path)
-   local out = {}
-   for doc_path, doc in pairs(self._docs) do
-      if doc_path ~= path then
-         for _, dep in ipairs(doc:get_dependency_files()) do
-            if dep == path then
-               table.insert(out, doc)
-               break
-            end
-         end
-      end
-   end
-   return out
 end
 
 

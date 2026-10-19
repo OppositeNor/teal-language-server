@@ -59,7 +59,7 @@ function DocumentSyncHandlers:_on_did_save(params: lsp.Method.Params): nil
    -- will happen anyway after the full env update
 
    logger:debug("detected document file saved - enqueuing full env update")
-   self._env_updater:schedule_env_update()
+   self._env_updater:schedule_env_update(doc.uri.path)
 end
 
 function DocumentSyncHandlers:_on_did_change(params: lsp.Method.Params): nil

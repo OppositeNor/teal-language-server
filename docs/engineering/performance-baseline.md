@@ -102,6 +102,21 @@ checks the candidate files), then 5 warm ones (cached checks).
 All uses were found (n × 20 + 3). The cold cost grows linearly, at about 3.4 ms per closed file of
 41 lines, and stays within the default 1.5 s budget at 150 files.
 
+**Module edit with many open documents (S10)**, 2026-10-19
+
+An unsaved edit to an open module with one open importer, while `k` unrelated 331-line documents
+are open. The time runs from `didChange` until the env rebuild and its re-checks are done (by
+polling `teal/serverStats`). It includes the 150 ms diagnostics debounce and the 100 ms rebuild
+debounce. Previous build `f4abd97` vs. S10, same script, back to back:
+
+| unrelated open documents | before (P50 / max of 5) | after (P50 / max of 5) |
+|---|---|---|
+|  5 | 357.7 / 387.5 | 255.6 / 264.3 |
+| 20 | 815.3 / 825.7 | 255.3 / 255.7 |
+
+The previous build re-checked every open document (≈ 30 ms each). Now the cost is independent of
+the number of unrelated documents: the remainder is the debounces.
+
 ## Reading the numbers
 
 * **Valid buffers: no measurable change.** P50 differences are within run-to-run noise. The new

@@ -58,9 +58,14 @@ local record EnvUpdater
    -- type report size right after the last env (re)build
    _type_baseline: integer
    _env_rebuilds: integer
+   -- files (absolute paths) whose text changed since the last env build:
+   -- the documents depending on them are re-checked eagerly after it
+   _changed: {string:boolean}
 
    type_count: function(EnvUpdater): integer
-   schedule_env_update: function(EnvUpdater)
+   schedule_env_update: function(EnvUpdater, changed_path?: string)
+   dependency_closure: function(EnvUpdater, Document): {string:boolean}
+   _affected_documents: function(EnvUpdater, {string:boolean}): {string:boolean}
 
    metamethod __call: function(self: EnvUpdater, server_state: ServerState, root_nursery:lusc.Nursery, document_manager: DocumentManager): EnvUpdater
 end
@@ -72,6 +77,7 @@ function EnvUpdater:__init(server_state: ServerState, root_nursery:lusc.Nursery,
    self._pending_analysis = {}
    self._type_baseline = 0
    self._env_rebuilds = 0
+   self._changed = {}
    self._server_state = server_state
    self._root_nursery = root_nursery
    self._document_manager = document_manager
@@ -182,14 +188,23 @@ function EnvUpdater:_update_env_on_changes()
 
       logger:debug("Now updating env...")
       local start_time = uv.hrtime()
+      -- decided on the old env, whose loaded modules record the dependencies
+      local affected = self:_affected_documents(self._changed)
+      self._changed = {}
       local env = self:_generate_env()
       self._server_state:set_env(env)
       local elapsed_time_ms = (uv.hrtime() - start_time) / 1e6
       logger:debug("Completed env update in %f ms", elapsed_time_ms)
 
-      for _, doc in pairs(self._document_manager.docs) do
+      -- Every document's semantic data referred to the old env, so all caches
+      -- go. Only documents whose inputs changed are re-checked now: the
+      -- diagnostics published for the others are still correct (same text,
+      -- same dependencies), and their next request re-checks them on demand.
+      for path, doc in pairs(self._document_manager.docs) do
          doc:clear_cache()
-         doc:process_and_publish_results()
+         if affected[path] then
+            doc:process_and_publish_results()
+         end
       end
       self._type_baseline = self:type_count()
       self._env_rebuilds = self._env_rebuilds + 1
@@ -220,6 +235,7 @@ end
 function EnvUpdater:get_stats(): {string:any}
    local env = self._server_state:get_env()
    return {
+      documentChecks = Document.check_count(),
       typeCount = self:type_count(),
       typeBaseline = self._type_baseline,
       loadedOrder = env and #env.loaded_order or 0,
@@ -238,12 +254,64 @@ function EnvUpdater:_check_type_report_growth()
    end
 end
 
--- Documents that import the changed module were checked against its previous
--- text; rebuilding the env makes them see the open (possibly unsaved) buffer.
+-- Files (absolute) a document depends on, directly or through the modules
+-- it requires: tl's Result.dependencies lists direct requires only, and the
+-- results of required modules are in env.loaded.
+function EnvUpdater:dependency_closure(doc: Document): {string:boolean}
+   local env = self._server_state:get_env()
+   local loaded_by_path: {string:tl.Result} = {}
+   for file, result in pairs(env.loaded) do
+      loaded_by_path[self._server_state:absolute_path(file)] = result
+   end
+   local out: {string:boolean} = {}
+   local stack: {string} = doc:get_dependency_files()
+   while #stack > 0 do
+      local file = table.remove(stack)
+      if not out[file] then
+         out[file] = true
+         local result = loaded_by_path[file]
+         for _, dep in pairs(result and result.dependencies or {}) do
+            table.insert(stack, self._server_state:absolute_path(dep))
+         end
+      end
+   end
+   return out
+end
+
+-- Open documents whose inputs changed: the document itself, or a file it
+-- depends on (transitively). Globals declared by a module are visible
+-- env-wide; a document that uses such a global without requiring the module
+-- is not detected here (it is re-checked on its next request).
+function EnvUpdater:_affected_documents(changed: {string:boolean}): {string:boolean}
+   local out: {string:boolean} = {}
+   if next(changed) == nil then
+      return out
+   end
+   for path, doc in pairs(self._document_manager.docs) do
+      if changed[path] then
+         out[path] = true
+      else
+         for dep in pairs(self:dependency_closure(doc)) do
+            if changed[dep] then
+               out[path] = true
+               break
+            end
+         end
+      end
+   end
+   return out
+end
+
+-- Documents that import the changed module, directly or through other
+-- modules, were checked against its previous text; rebuilding the env makes
+-- them see the open (possibly unsaved) buffer.
 function EnvUpdater:refresh_dependents(path: string)
-   if #self._document_manager:dependents_of(path) > 0 then
-      logger:debug("%s has dependents among open documents - enqueuing env update", path)
-      self:schedule_env_update()
+   for other_path, doc in pairs(self._document_manager.docs) do
+      if other_path ~= path and self:dependency_closure(doc)[path] then
+         logger:debug("%s has dependents among open documents - enqueuing env update", path)
+         self:schedule_env_update(path)
+         return
+      end
    end
 end
 
@@ -280,7 +348,13 @@ function EnvUpdater:schedule_analysis(doc: Document)
    end)
 end
 
-function EnvUpdater:schedule_env_update()
+-- Schedules a (debounced) env rebuild. `changed_path` is a file whose text
+-- changed; the open documents depending on it are re-checked after the
+-- rebuild.
+function EnvUpdater:schedule_env_update(changed_path?: string)
+   if changed_path then
+      self._changed[changed_path] = true
+   end
    self._change_detected:set()
 end
 

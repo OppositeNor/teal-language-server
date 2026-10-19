@@ -169,13 +169,30 @@ current snapshot on every request, and nothing holds an identity across versions
    declaration line (locals) or the record identity and name (members). This keeps the list cheap,
    as typescript-language-server's `cacheId` does.
 
-## 5. Concurrency and cancellation
+## 5. Invalidation
+
+| Event | What happens |
+|---|---|
+| An edit | Invalidates the document's own cache. Requests re-check on demand; diagnostics are debounced. |
+| A debounced analysis of a module that open documents depend on, directly or through modules that are not open | The env is rebuilt and that file is marked changed. Dependencies come from `Result.dependencies` of each document and of each module in `env.loaded`. |
+| A save | Marks the saved file changed. |
+| Type-report growth past `type_report_limit` | Rebuilds with no changed file. |
+
+After a rebuild, every document's cache is dropped, because it referred to the old env. Only
+documents that are changed, or that depend on a changed file, are re-checked and republished
+right away. The others' published diagnostics stay valid: same text, same dependencies. Their
+semantic data is recomputed on the next request.
+
+Caveat: a global declared by a module is visible env-wide. A document that uses it without
+requiring the module is not treated as a dependent.
+
+## 6. Concurrency and cancellation
 
 All analysis runs on the single lusc task loop. tl keeps global state (one env, one reporter), so
 there is no parallel checking. `$/cancelRequest` drops queued requests. A request that has started
 runs to completion; requests are short (see `performance-baseline.md`).
 
-## 6. Deliberately not built
+## 7. Deliberately not built
 
 * **A query or incremental engine (salsa-like).** Whole-buffer re-checks take milliseconds at
   realistic sizes, and tl has no incremental API.

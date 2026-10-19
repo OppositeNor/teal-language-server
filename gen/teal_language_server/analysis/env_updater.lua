@@ -65,6 +65,11 @@ local EnvUpdater = {}
 
 
 
+
+
+
+
+
 function EnvUpdater:__init(server_state, root_nursery, document_manager)
    asserts.is_not_nil(document_manager)
 
@@ -72,6 +77,7 @@ function EnvUpdater:__init(server_state, root_nursery, document_manager)
    self._pending_analysis = {}
    self._type_baseline = 0
    self._env_rebuilds = 0
+   self._changed = {}
    self._server_state = server_state
    self._root_nursery = root_nursery
    self._document_manager = document_manager
@@ -182,14 +188,23 @@ function EnvUpdater:_update_env_on_changes()
 
       logger:debug("Now updating env...")
       local start_time = uv.hrtime()
+
+      local affected = self:_affected_documents(self._changed)
+      self._changed = {}
       local env = self:_generate_env()
       self._server_state:set_env(env)
       local elapsed_time_ms = (uv.hrtime() - start_time) / 1e6
       logger:debug("Completed env update in %f ms", elapsed_time_ms)
 
-      for _, doc in pairs(self._document_manager.docs) do
+
+
+
+
+      for path, doc in pairs(self._document_manager.docs) do
          doc:clear_cache()
-         doc:process_and_publish_results()
+         if affected[path] then
+            doc:process_and_publish_results()
+         end
       end
       self._type_baseline = self:type_count()
       self._env_rebuilds = self._env_rebuilds + 1
@@ -220,6 +235,7 @@ end
 function EnvUpdater:get_stats()
    local env = self._server_state:get_env()
    return {
+      documentChecks = Document.check_count(),
       typeCount = self:type_count(),
       typeBaseline = self._type_baseline,
       loadedOrder = env and #env.loaded_order or 0,
@@ -240,10 +256,62 @@ end
 
 
 
+
+function EnvUpdater:dependency_closure(doc)
+   local env = self._server_state:get_env()
+   local loaded_by_path = {}
+   for file, result in pairs(env.loaded) do
+      loaded_by_path[self._server_state:absolute_path(file)] = result
+   end
+   local out = {}
+   local stack = doc:get_dependency_files()
+   while #stack > 0 do
+      local file = table.remove(stack)
+      if not out[file] then
+         out[file] = true
+         local result = loaded_by_path[file]
+         for _, dep in pairs(result and result.dependencies or {}) do
+            table.insert(stack, self._server_state:absolute_path(dep))
+         end
+      end
+   end
+   return out
+end
+
+
+
+
+
+function EnvUpdater:_affected_documents(changed)
+   local out = {}
+   if next(changed) == nil then
+      return out
+   end
+   for path, doc in pairs(self._document_manager.docs) do
+      if changed[path] then
+         out[path] = true
+      else
+         for dep in pairs(self:dependency_closure(doc)) do
+            if changed[dep] then
+               out[path] = true
+               break
+            end
+         end
+      end
+   end
+   return out
+end
+
+
+
+
 function EnvUpdater:refresh_dependents(path)
-   if #self._document_manager:dependents_of(path) > 0 then
-      logger:debug("%s has dependents among open documents - enqueuing env update", path)
-      self:schedule_env_update()
+   for other_path, doc in pairs(self._document_manager.docs) do
+      if other_path ~= path and self:dependency_closure(doc)[path] then
+         logger:debug("%s has dependents among open documents - enqueuing env update", path)
+         self:schedule_env_update(path)
+         return
+      end
    end
 end
 
@@ -280,7 +348,13 @@ function EnvUpdater:schedule_analysis(doc)
    end)
 end
 
-function EnvUpdater:schedule_env_update()
+
+
+
+function EnvUpdater:schedule_env_update(changed_path)
+   if changed_path then
+      self._changed[changed_path] = true
+   end
    self._change_detected:set()
 end
 

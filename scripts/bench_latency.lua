@@ -160,6 +160,51 @@ local function bench_workspace(n)
       ("%.1f / %.1f"):format(percentile(warm, 0.5), percentile(warm, 0.95)), rss and ("%d"):format(rss // 1024) or "?"))
 end
 
+-- An unsaved edit to an open module with one open importer, while `k`
+-- unrelated documents are open: time from didChange until the server has
+-- rebuilt the env and re-checked what it re-checks (measured by polling
+-- teal/serverStats, which is answered once that work is done).
+local function bench_module_edit(k)
+   local project = require("tests.helpers.project")
+   local files = {
+      ["m.tl"] = "local M = {}\nM.v = 1\nreturn M\n",
+      ["user.tl"] = 'local m = require("m")\nlocal n: integer = m.v\nprint(n)\n',
+   }
+   local open = { "m.tl", "user.tl" }
+   for i = 1, k do
+      local name = ("doc%02d.tl"):format(i)
+      files[name] = make_doc(30, "print(p)")
+      table.insert(open, name)
+   end
+   local dir = project.create(files)
+   local client = LspClient.new(server, {})
+   client:initialize("file://" .. dir)
+   for _, name in ipairs(open) do
+      client:open_document("file://" .. dir .. "/" .. name, files[name])
+      client:wait_for_notification("textDocument/publishDiagnostics", 120000)
+   end
+   local function stats()
+      return client:wait_for_response(client:request("teal/serverStats", {}), 120000).result
+   end
+   local samples = {}
+   for i = 1, 5 do
+      local before = stats().envRebuilds
+      local start = now_ms()
+      client:change_document("file://" .. dir .. "/m.tl", ("local M = {}\nM.v = %d\nreturn M\n"):format(i + 1), i + 1)
+      while stats().envRebuilds <= before do
+         local t = uv.new_timer()
+         local done = false
+         uv.timer_start(t, 5, 0, function() done = true end)
+         while not done do uv.run("once") end
+         uv.close(t)
+      end
+      samples[i] = now_ms() - start
+   end
+   client:shutdown()
+   project.remove(dir)
+   print(("| %3d | %s |"):format(k, ("%.1f / %.1f"):format(percentile(samples, 0.5), percentile(samples, 1.0))))
+end
+
 print(("server: %s, %d iterations per size; latencies in ms (P50 / P95)"):format(server, iterations))
 print("| lines | open (ms) | completion, broken buffer | completion, valid buffer | hover | definition | RSS (MB) |")
 print("|---|---|---|---|---|---|---|")
@@ -173,4 +218,12 @@ print("| closed files | locations | cold (ms) | warm P50 / P95 (ms) | RSS (MB) |
 print("|---|---|---|---|---|")
 for _, n in ipairs({ 10, 50, 150 }) do
    bench_workspace(n)
+end
+
+print()
+print("unsaved edit to an open module (1 open importer) until the env rebuild is done; includes the 150 ms diagnostics debounce and the 100 ms rebuild debounce")
+print("| unrelated open documents (331 lines each) | P50 / max of 5 (ms) |")
+print("|---|---|")
+for _, k in ipairs({ 5, 20 }) do
+   bench_module_edit(k)
 end

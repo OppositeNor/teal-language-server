@@ -107,6 +107,8 @@ local Document = { NodeInfo = {} }
 
 
 
+
+
 function Document:__init(uri, content, version, lsp_reader_writer, server_state)
    asserts.is_not_nil(lsp_reader_writer)
    asserts.is_not_nil(server_state)
@@ -147,6 +149,13 @@ function Document:_get_ast(tokens)
 end
 
 
+local checks_done = 0
+
+function Document.check_count()
+   return checks_done
+end
+
+
 
 function Document:_forget_report_entries()
    local tr = self._server_state:get_env().reporter:get_report()
@@ -166,6 +175,7 @@ function Document:_get_result(ast)
       }
 
 
+      checks_done = checks_done + 1
       local ok, result = pcall(tl.check, ast, self._uri.path, opts, self._server_state:get_env())
       if ok then
          cache.result = result

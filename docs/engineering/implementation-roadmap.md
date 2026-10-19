@@ -32,19 +32,19 @@ Each milestone is a vertical slice with the same parts:
 
 | S9 (P2) | **Auto-import completion** (was N5) | Workspace modules that are not required are offered as completion items with an edit adding the `require`; the index refresh is rate-limited for completion | `tests/auto_import_test.lua` |
 
-Suite after S1–S9: **162 tests, 159 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
+| S10 (P4) | **Dependency-aware invalidation** (was N6) | After an env rebuild, only changed documents and their (transitive) dependents are re-checked eagerly; others lazily. Fixes importers through closed modules never being refreshed. `teal/serverStats` reports `documentChecks` | `tests/invalidation_test.lua` fails on `f4abd97`; benchmark: 815 → 255 ms with 20 open documents |
+
+Suite after S1–S10: **164 tests, 161 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
 
 ## Next (in priority order)
 
-### N6 (P4): scale
+### Next candidates (not scheduled)
 
-* Measure a multi-file workspace (dependency edits re-check every open document today).
-* Candidate improvement: re-check only `dependents_of(path)` instead of the whole env.
-* This needs care, because tl caches module types in `env.modules`. A dependency's new type must
-  replace the cached one without rebuilding the env. That requires an explicit invalidation rule:
-  drop the module and its transitive dependents from `env.modules` / `env.loaded`. Verify with the
-  existing unsaved-dependency tests plus a test where an exported type changes.
-* Do this only with before/after numbers.
+* **Keep unaffected documents' semantic data across an env rebuild.** Today their caches are
+  dropped and rebuilt on demand. Keeping them would need the module types they captured to stay
+  valid, which tl's shared env does not guarantee.
+* **Extract variable / function** (P3). This needs reliable expression ranges and scope analysis.
+* **Semantic tokens** (P3), from the resolver's classification.
 
 ### Blocked on tl (proposals in the audit, §6)
 

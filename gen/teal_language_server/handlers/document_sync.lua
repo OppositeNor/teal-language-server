@@ -59,7 +59,7 @@ function DocumentSyncHandlers:_on_did_save(params)
 
 
    logger:debug("detected document file saved - enqueuing full env update")
-   self._env_updater:schedule_env_update()
+   self._env_updater:schedule_env_update(doc.uri.path)
 end
 
 function DocumentSyncHandlers:_on_did_change(params)

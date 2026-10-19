@@ -90,6 +90,8 @@ local record Document
    _tree: ltreesitter.Tree
    _tree_cursor: ltreesitter.Cursor
 
+   check_count: function(): integer
+
    metamethod __call: function(self: Document, uri: Uri, content: string, version: integer, lsp_reader_writer: LspReaderWriter, server_state: ServerState): Document
 end
 
@@ -146,6 +148,13 @@ function Document:_get_ast(tokens?: {tl.Token}): tl.Node, {tl.Error}
    return cache.ast, cache.parse_errors
 end
 
+-- number of type checks of document texts (speculative checks excluded)
+local checks_done = 0
+
+function Document.check_count(): integer
+   return checks_done
+end
+
 -- Drops what the shared type report holds for this file, so that queries
 -- cannot answer from an earlier version's positions.
 function Document:_forget_report_entries()
@@ -166,6 +175,7 @@ function Document:_get_result(ast: tl.Node): tl.Result
       }
 
       -- a recovered AST can contain shapes the checker does not expect
+      checks_done = checks_done + 1
       local ok, result = pcall(tl.check, ast, self._uri.path, opts, self._server_state:get_env())
       if ok then
          cache.result = result as tl.Result
