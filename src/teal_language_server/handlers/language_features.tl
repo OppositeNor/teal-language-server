@@ -169,6 +169,45 @@ local function expression_type(doc: Document, key: semantic.ExprKey, names_only:
    return doc:type_information_for_tokens(names, first.y - 1, first.x - 1)
 end
 
+-- Workspace modules to offer with an added `require` (see
+-- completion.auto_import_candidates). `in_scope` are the scope candidates
+-- already collected, so a name that is visible is not offered again.
+function LanguageFeatureHandlers:_auto_import_candidates(doc: Document, ctx: completion.Context, in_scope: {completion.Candidate}): {completion.Candidate}
+   if ctx.prefix == "" then
+      return {}
+   end
+   local index = self._server_state:get_workspace_index()
+   workspace_index.refresh_if_stale(index, function(p: string): string
+      return self._document_manager:open_content(p)
+   end, 2000)
+   local visible: {string:boolean} = {}
+   for _, c in ipairs(in_scope) do
+      visible[c.label] = true
+   end
+   local modules: {completion.ModuleRef} = {}
+   for _, m in ipairs(workspace_index.modules(index)) do
+      table.insert(modules, { name = m.name, path = m.path })
+   end
+   return completion.auto_import_candidates(modules, doc.uri.path,
+      completion.required_modules(doc:get_tokens()), visible, ctx.prefix)
+end
+
+-- The edit adding `local name = require("module")` with the file's other
+-- requires (see completion.import_insertion_line).
+function LanguageFeatureHandlers:_import_edit(doc: Document, name: string, module: string): {string:any}
+   local line = completion.import_insertion_line(doc:get_tokens()) - 1
+   local text = string.format("local %s = require(\"%s\")", name, module)
+   local line_count = #position.split_lines(doc.content)
+   if line >= line_count and doc.content:sub(-1) ~= "\n" then
+      -- after a last line without a newline: append to it
+      local last = line_count - 1
+      local at = doc:byte_to_lsp_position(last, #doc:get_line(last))
+      return { range = { start = at, ["end"] = at }, newText = "\n" .. text }
+   end
+   local at = lsp.position(line, 0)
+   return { range = { start = at, ["end"] = at }, newText = text .. "\n" }
+end
+
 -- Types a string literal is expected to have, from where tl recorded them.
 local function literal_expected_types(doc: Document, ctx: completion.Context): {tl.TypeInfo}
    local report = doc:get_type_report()
@@ -280,6 +319,9 @@ function LanguageFeatureHandlers:_on_completion(params: lsp.Method.Params, id: i
    else
       candidates = completion.scope_candidates(report, path, pos.line + 1, pos.character + 1,
          doc:get_type_positions(), ctx.prefix_y, ctx.prefix_x)
+      for _, c in ipairs(self:_auto_import_candidates(doc, ctx, candidates)) do
+         table.insert(candidates, c)
+      end
       for _, c in ipairs(completion.keyword_candidates(completion.keywords)) do
          table.insert(candidates, c)
       end
@@ -310,7 +352,11 @@ function LanguageFeatureHandlers:_on_completion(params: lsp.Method.Params, id: i
       else
          item = { label = c.label }
       end
-      if ctx.kind == "constructor" then
+      if c.kind == "auto_import" then
+         item.kind = lsp.completion_item_kind.Module
+         item.detail = string.format("require(\"%s\")", c.module)
+         item.additionalTextEdits = { self:_import_edit(doc, c.label, c.module) }
+      elseif ctx.kind == "constructor" then
          item.kind = lsp.completion_item_kind.Field
          item.insertText = c.label .. " = "
          item.insertTextFormat = nil

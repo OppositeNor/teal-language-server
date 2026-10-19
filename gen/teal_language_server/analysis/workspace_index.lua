@@ -10,6 +10,7 @@ local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 th
 
 local tl = require("tl")
 local lfs = require("lfs")
+local uv = require("luv")
 local ast_walk = require("teal_language_server.analysis.diagnostics.ast_walk")
 local symbols = require("teal_language_server.analysis.symbols")
 local position = require("teal_language_server.util.position")
@@ -29,7 +30,14 @@ local SKIP_DIRS = {
    [".luarocks"] = true,
 }
 
-local workspace_index = { Entry = {}, Index = {}, Match = {} }
+local workspace_index = { Entry = {}, Index = {}, Module = {}, Match = {} }
+
+
+
+
+
+
+
 
 
 
@@ -121,6 +129,7 @@ end
 
 
 function workspace_index.refresh(index, open_content)
+   index.refreshed_at = uv.now()
    local files = {}
    scan(index.root, index.skip, files)
    local seen = {}
@@ -148,6 +157,14 @@ function workspace_index.refresh(index, open_content)
       if not seen[path] then
          index.entries[path] = nil
       end
+   end
+end
+
+
+
+function workspace_index.refresh_if_stale(index, open_content, max_age_ms)
+   if index.refreshed_at == nil or uv.now() - index.refreshed_at >= max_age_ms then
+      workspace_index.refresh(index, open_content)
    end
 end
 
@@ -208,8 +225,10 @@ end
 
 
 
-function workspace_index.module_names(index)
-   local set = {}
+
+
+function workspace_index.modules(index)
+   local by_name = {}
    for path in pairs(index.entries) do
       for _, r in ipairs(index.module_roots) do
          local base = r == "" and index.root or (index.root .. "/" .. r)
@@ -217,17 +236,29 @@ function workspace_index.module_names(index)
             local rel = path:sub(#base + 2)
             rel = rel:gsub("%.d%.tl$", ""):gsub("%.tl$", ""):gsub("/init$", "")
             if not rel:find("%.") then
-               set[(rel:gsub("/", "."))] = true
+               local name = rel:gsub("/", ".")
+
+               if by_name[name] == nil or path < by_name[name] then
+                  by_name[name] = path
+               end
             end
             break
          end
       end
    end
    local out = {}
-   for name in pairs(set) do
-      table.insert(out, name)
+   for name, path in pairs(by_name) do
+      table.insert(out, { name = name, path = path })
    end
-   table.sort(out)
+   table.sort(out, function(a, b) return a.name < b.name end)
+   return out
+end
+
+function workspace_index.module_names(index)
+   local out = {}
+   for _, m in ipairs(workspace_index.modules(index)) do
+      table.insert(out, m.name)
+   end
    return out
 end
 

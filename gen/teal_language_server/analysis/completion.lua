@@ -22,7 +22,16 @@ local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 th
 local tl = require("tl")
 local semantic = require("teal_language_server.analysis.semantic")
 
-local completion = { Context = {}, Candidate = {} }
+local completion = { Context = {}, Candidate = {}, ModuleRef = {} }
+
+
+
+
+
+
+
+
+
 
 
 
@@ -122,6 +131,7 @@ completion.tiers = {
    local_type = 10,
    primitive_type = 11,
    global = 15,
+   auto_import = 16,
    keyword = 17,
 }
 
@@ -130,6 +140,11 @@ completion.keywords = {
    "global", "goto", "if", "in", "interface", "local", "nil", "not", "or", "record",
    "repeat", "return", "then", "true", "type", "until", "while",
 }
+
+local completion_keywords_set = {}
+for _, kw in ipairs(completion.keywords) do
+   completion_keywords_set[kw] = true
+end
 
 
 completion.declaration_keywords = { "enum", "function", "interface", "record", "type" }
@@ -735,6 +750,98 @@ function completion.parameter_types(report, fn, index)
       end
    end
    return out
+end
+
+
+function completion.required_modules(tokens)
+   local out = {}
+   for i, t in ipairs(tokens) do
+      if t.tk == "require" and t.kind == "identifier" then
+         local nxt = tokens[i + 1]
+         if nxt and nxt.tk == "(" then
+            nxt = tokens[i + 2]
+         end
+         if nxt and nxt.kind == "string" then
+            local name = nxt.tk:match("^[\"'](.*)[\"']$")
+            if name then
+               out[name] = true
+            end
+         end
+      end
+   end
+   return out
+end
+
+
+
+function completion.import_name(module)
+   local last = module:match("([^%.]+)$")
+   if last and last:match("^[%a_][%w_]*$") and not completion_keywords_set[last] then
+      return last
+   end
+   return nil
+end
+
+
+
+
+
+
+function completion.auto_import_candidates(modules, current_path, required, visible, prefix)
+   local out = {}
+   if prefix == nil or prefix == "" then
+      return out
+   end
+   local first = prefix:sub(1, 1):lower()
+   local seen = {}
+   for _, m in ipairs(modules) do
+      local name = completion.import_name(m.name)
+      if name and m.path ~= current_path and not required[m.name] and not visible[name] and not seen[name] and
+         name:sub(1, 1):lower() == first then
+         seen[name] = true
+         table.insert(out, { label = name, kind = "auto_import", module = m.name, tier = completion.tiers.auto_import })
+      end
+   end
+   return out
+end
+
+
+
+
+
+function completion.import_insertion_line(tokens)
+   local i = 1
+   local after
+   while tokens[i] and tokens[i].tk == "local" and tokens[i + 1] and tokens[i + 1].kind == "identifier" and
+      tokens[i + 2] and tokens[i + 2].tk == "=" and tokens[i + 3] and tokens[i + 3].tk == "require" do
+
+      local j = i + 4
+      if tokens[j] and tokens[j].tk == "(" then
+         while tokens[j] and tokens[j].tk ~= ")" do j = j + 1 end
+         j = j + 1
+      else
+         j = j + 1
+      end
+      while tokens[j] and tokens[j].tk == "." and tokens[j + 1] and tokens[j + 1].kind == "identifier" do
+         j = j + 2
+      end
+      after = tokens[j - 1].y
+      i = j
+   end
+   if after then
+      return after + 1
+   end
+   local first = tokens[1]
+   if first == nil or first.kind == "$EOF$" then
+      return 1
+   end
+
+   if first.comments and #first.comments > 0 then
+      local c = first.comments[#first.comments]
+      local _, newlines = c.text:gsub("\n", "")
+      return math.min(first.y, c.y + newlines + 1)
+   end
+   return first.y
 end
 
 function completion.keyword_candidates(words)

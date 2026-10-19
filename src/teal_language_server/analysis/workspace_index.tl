@@ -10,6 +10,7 @@ local _module_name = "analysis.workspace_index"
 
 local tl <const> = require("tl")
 local lfs <const> = require("lfs")
+local uv <const> = require("luv")
 local ast_walk <const> = require("teal_language_server.analysis.diagnostics.ast_walk")
 local symbols <const> = require("teal_language_server.analysis.symbols")
 local position <const> = require("teal_language_server.util.position")
@@ -43,6 +44,13 @@ local record workspace_index
       module_roots: {string}
       skip: {string:boolean}
       entries: {string:Entry}
+      -- uv.now() of the last refresh
+      refreshed_at: number
+   end
+
+   record Module
+      name: string
+      path: string
    end
 
    record Match
@@ -121,6 +129,7 @@ end
 -- Rescans the workspace. `open_content(path)` returns the buffer text of an
 -- open document (unsaved edits win over the file on disk) or nil.
 function workspace_index.refresh(index: Index, open_content: function(string): string)
+   index.refreshed_at = uv.now()
    local files: {string} = {}
    scan(index.root, index.skip, files)
    local seen: {string:boolean} = {}
@@ -148,6 +157,14 @@ function workspace_index.refresh(index: Index, open_content: function(string): s
       if not seen[path] then
          index.entries[path] = nil
       end
+   end
+end
+
+-- Refreshes the index unless that happened less than `max_age_ms` ago; for
+-- requests sent on every keystroke, such as completion.
+function workspace_index.refresh_if_stale(index: Index, open_content: function(string): string, max_age_ms: number)
+   if index.refreshed_at == nil or uv.now() - index.refreshed_at >= max_age_ms then
+      workspace_index.refresh(index, open_content)
    end
 end
 
@@ -208,8 +225,10 @@ end
 
 -- Module names requirable from the indexed files: "a/b.tl" under a module
 -- root becomes "a.b"; "a/init.tl" becomes "a". Sorted and unique.
-function workspace_index.module_names(index: Index): {string}
-   local set: {string:boolean} = {}
+-- Module names (as `require` takes them) of the indexed files under the
+-- module roots, with the file each resolves to, sorted by name.
+function workspace_index.modules(index: Index): {workspace_index.Module}
+   local by_name: {string:string} = {}
    for path in pairs(index.entries) do
       for _, r in ipairs(index.module_roots) do
          local base = r == "" and index.root or (index.root .. "/" .. r)
@@ -217,17 +236,29 @@ function workspace_index.module_names(index: Index): {string}
             local rel = path:sub(#base + 2)
             rel = rel:gsub("%.d%.tl$", ""):gsub("%.tl$", ""):gsub("/init$", "")
             if not rel:find("%.") then
-               set[(rel:gsub("/", "."))] = true
+               local name = rel:gsub("/", ".")
+               -- the same name through two roots: keep the first path in order
+               if by_name[name] == nil or path < by_name[name] then
+                  by_name[name] = path
+               end
             end
             break
          end
       end
    end
-   local out: {string} = {}
-   for name in pairs(set) do
-      table.insert(out, name)
+   local out: {workspace_index.Module} = {}
+   for name, path in pairs(by_name) do
+      table.insert(out, { name = name, path = path })
    end
-   table.sort(out)
+   table.sort(out, function(a: workspace_index.Module, b: workspace_index.Module): boolean return a.name < b.name end)
+   return out
+end
+
+function workspace_index.module_names(index: Index): {string}
+   local out: {string} = {}
+   for _, m in ipairs(workspace_index.modules(index)) do
+      table.insert(out, m.name)
+   end
    return out
 end
 

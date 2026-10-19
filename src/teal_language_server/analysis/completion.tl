@@ -93,6 +93,8 @@ local record completion
 
    enum CandidateKind
       "field" "method" "function" "variable" "type" "keyword" "enum_member" "module"
+      -- a workspace module that is not required yet
+      "auto_import"
    end
 
    record Candidate
@@ -103,6 +105,13 @@ local record completion
       tier: integer
       -- the candidate is a method used through `:` (self is implicit)
       colon_call: boolean
+      -- auto_import: the module name to require
+      module: string
+   end
+
+   record ModuleRef
+      name: string
+      path: string
    end
 
    -- ranking tiers
@@ -122,6 +131,7 @@ completion.tiers = {
    local_type = 10,
    primitive_type = 11,
    global = 15,
+   auto_import = 16,
    keyword = 17,
 }
 
@@ -130,6 +140,11 @@ completion.keywords = {
    "global", "goto", "if", "in", "interface", "local", "nil", "not", "or", "record",
    "repeat", "return", "then", "true", "type", "until", "while",
 }
+
+local completion_keywords_set: {string:boolean} = {}
+for _, kw in ipairs(completion.keywords) do
+   completion_keywords_set[kw] = true
+end
 
 -- keywords that can follow `local` / `global`
 completion.declaration_keywords = { "enum", "function", "interface", "record", "type" }
@@ -735,6 +750,98 @@ function completion.parameter_types(report: tl.TypeReport, fn: tl.TypeInfo, inde
       end
    end
    return out
+end
+
+-- Modules already required in the file: `require("m")` / `require "m"`.
+function completion.required_modules(tokens: {tl.Token}): {string:boolean}
+   local out: {string:boolean} = {}
+   for i, t in ipairs(tokens) do
+      if t.tk == "require" and t.kind == "identifier" then
+         local nxt = tokens[i + 1]
+         if nxt and nxt.tk == "(" then
+            nxt = tokens[i + 2]
+         end
+         if nxt and nxt.kind == "string" then
+            local name = nxt.tk:match("^[\"'](.*)[\"']$")
+            if name then
+               out[name] = true
+            end
+         end
+      end
+   end
+   return out
+end
+
+-- The local name an auto-import binds a module to: its last component
+-- (`util.strings` -> `strings`), or nil if that is not an identifier.
+function completion.import_name(module: string): string
+   local last = module:match("([^%.]+)$")
+   if last and last:match("^[%a_][%w_]*$") and not completion_keywords_set[last] then
+      return last
+   end
+   return nil
+end
+
+-- Workspace modules offered for auto-import at a scope position: not the
+-- current file, not required yet, and whose local name is not already
+-- visible (`visible` holds the names in scope and the globals) and starts
+-- with the typed prefix's first letter (case-insensitive). An empty prefix
+-- offers none, as the list would be the whole workspace.
+function completion.auto_import_candidates(modules: {completion.ModuleRef}, current_path: string, required: {string:boolean}, visible: {string:boolean}, prefix: string): {completion.Candidate}
+   local out: {completion.Candidate} = {}
+   if prefix == nil or prefix == "" then
+      return out
+   end
+   local first = prefix:sub(1, 1):lower()
+   local seen: {string:boolean} = {}
+   for _, m in ipairs(modules) do
+      local name = completion.import_name(m.name)
+      if name and m.path ~= current_path and not required[m.name] and not visible[name] and not seen[name]
+         and name:sub(1, 1):lower() == first then
+         seen[name] = true
+         table.insert(out, { label = name, kind = "auto_import", module = m.name, tier = completion.tiers.auto_import })
+      end
+   end
+   return out
+end
+
+-- Line (1-based) before which an auto-import's `local x = require(...)` is
+-- inserted: after the last leading `local x = require(...)` statement, else
+-- before the first statement (after a leading comment block, which stays
+-- the file's header). Returns 1 for an empty file.
+function completion.import_insertion_line(tokens: {tl.Token}): integer
+   local i = 1
+   local after: integer
+   while tokens[i] and tokens[i].tk == "local" and tokens[i + 1] and tokens[i + 1].kind == "identifier"
+      and tokens[i + 2] and tokens[i + 2].tk == "=" and tokens[i + 3] and tokens[i + 3].tk == "require" do
+      -- skip `require(...)` / `require "..."`, plus a trailing `.field` chain
+      local j = i + 4
+      if tokens[j] and tokens[j].tk == "(" then
+         while tokens[j] and tokens[j].tk ~= ")" do j = j + 1 end
+         j = j + 1
+      else
+         j = j + 1
+      end
+      while tokens[j] and tokens[j].tk == "." and tokens[j + 1] and tokens[j + 1].kind == "identifier" do
+         j = j + 2
+      end
+      after = tokens[j - 1].y
+      i = j
+   end
+   if after then
+      return after + 1
+   end
+   local first = tokens[1]
+   if first == nil or first.kind == "$EOF$" then
+      return 1
+   end
+   -- a leading comment block attached to the first statement is a header
+   if first.comments and #first.comments > 0 then
+      local c = first.comments[#first.comments]
+      local _, newlines = c.text:gsub("\n", "")
+      return math.min(first.y, c.y + newlines + 1)
+   end
+   return first.y
 end
 
 function completion.keyword_candidates(words: {string}): {completion.Candidate}

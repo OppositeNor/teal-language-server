@@ -30,16 +30,11 @@ Each milestone is a vertical slice with the same parts:
 
 | S8 (P2) | **Workspace-wide references and rename** (was N4) | Whole-word pre-filter over the workspace index; closed candidates type checked as transient Documents (cached per mtime and env, `references_budget_ms`); hits confirmed by the resolver; rename edits closed files (`version: null`) and refuses incomplete searches. The test client now uses an empty workspace root instead of `/tmp`. | `tests/workspace_references_test.lua` fails on `c5ac304`; `scripts/bench_latency.lua` workspace scenario |
 
-Suite after S1–S8: **160 tests, 157 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
+| S9 (P2) | **Auto-import completion** (was N5) | Workspace modules that are not required are offered as completion items with an edit adding the `require`; the index refresh is rate-limited for completion | `tests/auto_import_test.lua` |
+
+Suite after S1–S9: **162 tests, 159 passed, 0 failed, 3 expected failures** (baseline: 131 / 127 / 0 / 4).
 
 ## Next (in priority order)
-
-### N5 (P2): auto-import completion
-
-* Builds on the workspace index used by S8.
-* Offer exported names of workspace modules not yet required.
-* The edit inserts `local m = require("…")` after the existing requires. It is applied only when
-  the name is not already bound in scope; check this with `semantic.visible_symbols`.
 
 ### N6 (P4): scale
 
