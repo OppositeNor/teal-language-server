@@ -7,9 +7,9 @@ A language server for the [Teal language](https://github.com/teal-language/tl)
 ## Features
 
 * Diagnostics (`textDocument/publishDiagnostics`): compiler errors and warnings plus lint rules, with rule codes, configurable severities and suppression comments (see [Configuration](#configuration))
-* Completion (`textDocument/completion`): scope symbols and keywords, record fields and `:` methods with type details and signatures (snippet placeholders when the editor supports them), `require("...")` module names
+* Completion (`textDocument/completion`), also while the current statement is unfinished: record fields and `:` methods of the receiver's type (including call results and generic instantiations), visible names ranked locals before globals before keywords, type names in type annotations, missing fields in record constructors, `require("...")` module names; type details, signatures and snippet placeholders when the editor supports them. Nothing is offered in comments, strings or new names
 * Hover (`textDocument/hover`)
-* Signature help (`textDocument/signatureHelp`), with the active parameter highlighted anywhere in the call
+* Signature help (`textDocument/signatureHelp`), with the active parameter highlighted anywhere in the call, including unfinished and nested calls
 * Go to definition / type definition (`textDocument/definition`, `textDocument/typeDefinition`)
 * Find references and document highlight (`textDocument/references`, `textDocument/documentHighlight`): locals, globals, and record fields and methods across open files
 * Rename (`textDocument/prepareRename`, `textDocument/rename`)
@@ -143,7 +143,15 @@ cyan build                           # type check and regenerate gen/
 tested -n 0 tests/                   # run the test suite (tested 0.3.x)
 ```
 
-Design notes: `docs/engineering/language-server-gap-analysis.md` and `docs/engineering/language-server-roadmap.md`.
+Latency benchmark (see `docs/engineering/performance-baseline.md`):
+
+```
+lua5.4 scripts/bench_latency.lua teal-language-server 30   # with luarocks_tree on LUA_PATH/LUA_CPATH
+```
+
+Design notes in `docs/engineering/`: `language-intelligence-audit.md`, `feature-matrix.md`,
+`semantic-architecture.md`, `implementation-roadmap.md`, `performance-baseline.md`, and the earlier
+`language-server-gap-analysis.md` / `language-server-roadmap.md` (diagnostics engine, M1–M8).
 
 ## Licences
 Alongside packages defined in the rockspec, teal-language-server includes the source of the following:

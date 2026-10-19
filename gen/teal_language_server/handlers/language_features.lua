@@ -1,4 +1,4 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local math = _tl_compat and _tl_compat.math or math; local _tl_math_maxinteger = math.maxinteger or math.pow(2, 53); local pairs = _tl_compat and _tl_compat.pairs or pairs; local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.language_feature"
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local math = _tl_compat and _tl_compat.math or math; local _tl_math_maxinteger = math.maxinteger or math.pow(2, 53); local string = _tl_compat and _tl_compat.string or string; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.language_feature"
 
 local handler_helper = require("teal_language_server.handlers.handler_helper")
 local DocumentManager = require("teal_language_server.analysis.document_manager")
@@ -7,6 +7,8 @@ local workspace_index = require("teal_language_server.analysis.workspace_index")
 local position = require("teal_language_server.util.position")
 local ast_walk = require("teal_language_server.analysis.diagnostics.ast_walk")
 local inlay_hints = require("teal_language_server.analysis.inlay_hints")
+local completion = require("teal_language_server.analysis.completion")
+local semantic = require("teal_language_server.analysis.semantic")
 local Document = require("teal_language_server.analysis.document")
 local LspReaderWriter = require("teal_language_server.lsp.reader_writer")
 local LspEventsManager = require("teal_language_server.lsp.events_manager")
@@ -35,12 +37,6 @@ function LanguageFeatureHandlers:__init(lsp_events_manager, lsp_reader_writer, d
    self._server_state = server_state
 end
 
-local TEAL_KEYWORDS = {
-   "and", "break", "do", "else", "elseif", "end", "enum", "false", "for", "function",
-   "global", "goto", "if", "in", "interface", "local", "nil", "not", "or", "record",
-   "repeat", "return", "then", "true", "type", "until", "while",
-}
-
 local function is_callable(ti)
    return ti.t == tl.typecodes.FUNCTION or ti.t == tl.typecodes.POLY
 end
@@ -54,7 +50,8 @@ end
 
 
 
-function LanguageFeatureHandlers:_completion_item(doc, key, ti, colon_access)
+
+function LanguageFeatureHandlers:_completion_item(doc, key, ti, colon_access, followed_by_call)
    local item = {
       label = key,
       kind = lsp.typecodes_to_kind[ti.t],
@@ -70,7 +67,7 @@ function LanguageFeatureHandlers:_completion_item(doc, key, ti, colon_access)
             kind = "markdown",
             value = "```teal\n" .. lsp_formatter.create_function_string(ti.str, args, key) .. "\n```",
          }
-         if self._server_state:client_capability("textDocument", "completion", "completionItem", "snippetSupport") then
+         if not followed_by_call and self._server_state:client_capability("textDocument", "completion", "completionItem", "snippetSupport") then
             local placeholders = {}
             for i, name in ipairs(args) do
                if not (i == 1 and colon_access and name == "self") and name ~= "..." then
@@ -119,166 +116,127 @@ function LanguageFeatureHandlers:_complete_require(params, id, pos)
    return true
 end
 
+local candidate_kind_to_lsp = {
+   field = lsp.completion_item_kind.Field,
+   method = lsp.completion_item_kind.Method,
+   ["function"] = lsp.completion_item_kind.Function,
+   variable = lsp.completion_item_kind.Variable,
+   keyword = lsp.completion_item_kind.Keyword,
+   enum_member = lsp.completion_item_kind.EnumMember,
+   module = lsp.completion_item_kind.Module,
+}
+
+local function type_kind_to_lsp(ti)
+   if ti and ti.t == tl.typecodes.ENUM then
+      return lsp.completion_item_kind.Enum
+   elseif ti and ti.t == tl.typecodes.INTERFACE then
+      return lsp.completion_item_kind.Interface
+   end
+   return lsp.completion_item_kind.Class
+end
+
+
+
+
+
+
+
+
+
+local function completion_receiver(doc, ctx)
+   if not ctx.in_type then
+      local ti = doc:type_of_expression(ctx.receiver)
+      if ti then
+         return ti
+      end
+   end
+   local tokens = doc:get_tokens()
+   local names = {}
+   for i = ctx.receiver.first, ctx.receiver.last do
+      local t = tokens[i]
+      if t.kind == "identifier" then
+         table.insert(names, t.tk)
+      elseif t.tk ~= "." then
+         return nil
+      end
+   end
+   local first = tokens[ctx.receiver.first]
+   return doc:type_information_for_tokens(names, first.y - 1, first.x - 1)
+end
+
 function LanguageFeatureHandlers:_on_completion(params, id)
-   local pos = handler_helper.byte_position(self._document_manager, params)
+   local doc = handler_helper.get_document(self._document_manager, params)
+   if doc == nil then
+      self._lsp_reader_writer:send_rpc(id, nil)
+      return
+   end
+   local pos = doc:to_byte_position(params.position)
    logger:info("Received request for completion at position: %s", pos)
 
    if self:_complete_require(params, id, pos) then
       return
    end
 
+   local line = doc:get_line(pos.line)
+   local ctx = completion.context(doc:get_tokens(), pos.line + 1, pos.character + 1,
+   doc:syntax_hint_at(pos.line, pos.character), line:sub(pos.character + 1))
+   logger:debug("Completion context: %s (prefix %q)", ctx.kind, ctx.prefix)
 
-
-   pos.character = pos.character - 1
-
-   local node_info, doc = handler_helper.get_node_info(self._document_manager, params, pos)
-   if node_info == nil then
-      logger:trace("No node found at given position")
+   if ctx.kind == "none" then
       self._lsp_reader_writer:send_rpc(id, nil)
       return
    end
 
-   logger:debug("Found node info: %s", node_info)
-
-   local type_info
-   local scope_completion = false
-
-
-
-   if node_info.type == "." or node_info.type == ":" then
-      type_info = doc:resolve_preceded_type(node_info, pos)
-
-
-   elseif node_info.type == "identifier" then
-      local tks
-
-      if handler_helper.indexable_parent_types[node_info.parent_type] then
-         tks = Document.split_by_symbols(node_info.parent_source, node_info.self_type)
-      else
-         tks = Document.split_by_symbols(node_info.source, node_info.self_type)
+   local report = doc:get_type_report()
+   local path = doc.uri.path
+   local candidates
+   if ctx.kind == "member" then
+      local receiver = completion_receiver(doc, ctx)
+      if receiver == nil then
+         logger:info("Completion receiver has no recorded type")
       end
+      candidates = completion.member_candidates(report, receiver, ctx.op, ctx.in_type)
+   elseif ctx.kind == "type" then
+      candidates = completion.type_candidates(report, path, pos.line + 1, pos.character + 1, doc:get_type_positions())
+   elseif ctx.kind == "declaration" then
+      candidates = completion.keyword_candidates(completion.declaration_keywords)
+   elseif ctx.kind == "constructor" and completion.constructor_candidates(report,
+      semantic.type_at_key(report, path, ctx.table_open.y, ctx.table_open.x, 0), {})[1] then
 
 
-
-
-      tks[#tks] = nil
-
-
-
-      if node_info.parent_type == "var" or
-         node_info.parent_type == "simple_type" or
-         node_info.parent_type == "table_type" then
-         self._lsp_reader_writer:send_rpc(id, nil)
-         return
-      end
-
-      type_info = doc:type_information_for_tokens(tks, pos.line, pos.character)
-
-      scope_completion = #tks == 0
+      local table_type = semantic.type_at_key(report, path, ctx.table_open.y, ctx.table_open.x, 0)
+      candidates = completion.constructor_candidates(report, table_type, ctx.present_keys)
    else
-      self._lsp_reader_writer:send_rpc(id, nil)
-      return
+      candidates = completion.scope_candidates(report, path, pos.line + 1, pos.character + 1,
+      doc:get_type_positions(), ctx.prefix_y, ctx.prefix_x)
+      for _, c in ipairs(completion.keyword_candidates(completion.keywords)) do
+         table.insert(candidates, c)
+      end
    end
 
    local items = {}
-
-   if not type_info then
-      logger:info("Also failed to find type type_info based on token")
-   end
-
-   if type_info then
-      logger:debug("Successfully found type_info")
-      local tr = doc:get_type_report()
-
-      if type_info.ref then
-         type_info = doc:resolve_type_ref(type_info.ref)
-      end
-
-
-      local was_string_type = type_info.t == tl.typecodes.STRING
-      if was_string_type then
-         type_info = tr.types[tr.globals["string"]]
-      end
-
-
-
-
-      local original_str = type_info.str
-
-
-
-      local function is_self_method(fn)
-         if fn.t ~= tl.typecodes.FUNCTION or not fn.args or #fn.args < 1 then
-            return false
-         end
-         local first_arg_type = doc:resolve_type_ref(fn.args[1][1])
-         return first_arg_type.t == tl.typecodes.SELF or
-         ((first_arg_type.t == tl.typecodes.NOMINAL or first_arg_type.t == tl.typecodes.RECORD) and first_arg_type.str == original_str) or
-         (was_string_type and first_arg_type.t == tl.typecodes.STRING)
-      end
-
-      if type_info.fields then
-         for key, v in pairs(type_info.fields) do
-            type_info = doc:resolve_type_ref(v)
-            local was_added
-
-            if node_info.type == ":" then
-
-
-               local self_method = false
-               if type_info.t == tl.typecodes.POLY then
-                  for _, ref in ipairs(type_info.types) do
-                     if is_self_method(doc:resolve_type_ref(ref)) then
-                        self_method = true
-                        break
-                     end
-                  end
-               else
-                  self_method = is_self_method(type_info)
-               end
-
-               if self_method then
-                  logger:debug("Adding self method %s", key)
-                  table.insert(items, self:_completion_item(doc, key, type_info, true))
-                  was_added = true
-               else
-                  logger:debug("Ignoring method %s with type 0x%08x for type info str %s",
-                  key, type_info.t, original_str)
-               end
-            else
-               table.insert(items, self:_completion_item(doc, key, type_info, false))
-               was_added = true
-            end
-
-            if not was_added then
-               logger:trace("Ignoring field %s", key)
-            end
-         end
-
-
-      elseif type_info.keys then
-         type_info = doc:resolve_type_ref(type_info.keys)
-
-         if type_info.enums then
-            for _, enum_value in ipairs(type_info.enums) do
-               table.insert(items, { label = enum_value, kind = lsp.typecodes_to_kind[type_info.t] })
-            end
-         end
+   for _, c in ipairs(completion.sort(candidates)) do
+      local item
+      if c.type_info and c.kind ~= "keyword" then
+         item = self:_completion_item(doc, c.label, c.type_info, c.colon_call or false, ctx.followed_by_call)
       else
-         logger:info("Unable to get fields for ref type")
+         item = { label = c.label }
       end
-   end
-
-   if scope_completion then
-      for _, kw in ipairs(TEAL_KEYWORDS) do
-         table.insert(items, { label = kw, kind = lsp.completion_item_kind.Keyword })
+      if ctx.kind == "constructor" then
+         item.kind = lsp.completion_item_kind.Field
+         item.insertText = c.label .. " = "
+         item.insertTextFormat = nil
+      elseif c.kind == "type" then
+         item.kind = type_kind_to_lsp(c.type_info)
+      else
+         item.kind = candidate_kind_to_lsp[c.kind] or item.kind
       end
+      item.sortText = string.format("%02d_%s", c.tier, c.label)
+      table.insert(items, item)
    end
 
    setmetatable(items, json.empty_array_mt)
-
    logger:debug("Sending %d back to client", #items)
-
    self._lsp_reader_writer:send_rpc(id, {
       isIncomplete = false,
       items = items,
@@ -391,7 +349,8 @@ function LanguageFeatureHandlers:_on_signature_help(params, id)
 
 
 
-   local paren, active_arg, method_call = enclosing_call(doc:get_tokens(), pos.line + 1, pos.character + 1)
+   local tokens = doc:get_tokens()
+   local paren, active_arg, method_call = enclosing_call(tokens, pos.line + 1, pos.character + 1)
    local lookup
    if paren then
       lookup = lsp.position(paren.y - 1, paren.x - 1)
@@ -400,14 +359,41 @@ function LanguageFeatureHandlers:_on_signature_help(params, id)
       active_arg = 0
    end
 
-   local node_info = handler_helper.get_node_info(self._document_manager, params, lookup)
-   if node_info == nil or node_info.type ~= "(" then
-      self._lsp_reader_writer:send_rpc(id, nil)
-      return
-   end
 
-   logger:debug("Got nodeinfo: %s", node_info)
-   local type_info = doc:resolve_preceded_type(node_info, lookup)
+
+   local type_info
+   local callee_name
+   if paren then
+      local key = semantic.expression_key(tokens, ast_walk.token_index_at(tokens, paren.y, paren.x) - 1)
+      if key then
+         type_info = doc:type_of_expression(key)
+
+         local parts = {}
+         for i = key.first, key.last do
+            local t = tokens[i]
+            if t.kind == "identifier" or t.tk == "." or t.tk == ":" then
+               table.insert(parts, t.tk)
+            else
+               parts = {}
+            end
+         end
+         if #parts > 0 and parts[1] ~= "." and parts[1] ~= ":" then
+            callee_name = table.concat(parts)
+         elseif tokens[key.last].kind == "identifier" then
+            callee_name = tokens[key.last].tk
+         end
+      end
+   end
+   if type_info == nil then
+      local node_info = handler_helper.get_node_info(self._document_manager, params, lookup)
+      if node_info == nil or node_info.type ~= "(" then
+         self._lsp_reader_writer:send_rpc(id, nil)
+         return
+      end
+      logger:debug("Got nodeinfo: %s", node_info)
+      type_info = doc:resolve_preceded_type(node_info, lookup)
+      callee_name = node_info.preceded_by
+   end
    if type_info == nil then
       self._lsp_reader_writer:send_rpc(id, nil)
       return
@@ -428,7 +414,7 @@ function LanguageFeatureHandlers:_on_signature_help(params, id)
          local args = doc:get_function_args_string(candidate)
          local label
          if args ~= nil then
-            label = lsp_formatter.create_function_string(candidate.str, args, node_info.preceded_by)
+            label = lsp_formatter.create_function_string(candidate.str, args, callee_name)
          else
             label = candidate.str
          end

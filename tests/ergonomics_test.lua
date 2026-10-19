@@ -60,10 +60,16 @@ end)
 tested.test("snippet insert text omits self for method calls when the client supports snippets", function()
     start({ textDocument = { completion = { completionItem = { snippetSupport = true } } } })
     local uri = "file:///tmp/tls_erg_snippet.tl"
-    open(uri, VEC)
-    local r = client:get_completions_triggered(uri, 5, 12, ":")
+    open(uri, VEC .. "\nlocal z = v:")
+    local r = client:get_completions_triggered(uri, 7, 12, ":")
     local item = find_item(r.result and r.result.items, "scale")
     tested.assert({ given = "snippet-capable client", should = "get placeholders for the parameters", expected = "scale(${1:factor}) 2", actual = item and (tostring(item.insertText) .. " " .. tostring(math.tointeger(item.insertTextFormat))) or "" })
+
+    -- `v:|scale(2)`: the call's parentheses already exist, so inserting them
+    -- again would produce `scale(factor)(2)`
+    r = client:get_completions_triggered(uri, 5, 12, ":")
+    item = find_item(r.result and r.result.items, "scale")
+    tested.assert({ given = "completion before an existing argument list", should = "insert the bare name", expected = true, actual = item ~= nil and item.insertText == nil })
 end)
 
 tested.test("keywords are offered when completing a bare identifier", function()

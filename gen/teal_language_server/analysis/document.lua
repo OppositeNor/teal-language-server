@@ -15,6 +15,8 @@ local fixer = require("teal_language_server.analysis.diagnostics.fixer")
 local linter = require("teal_language_server.analysis.diagnostics.linter")
 local doc_symbols = require("teal_language_server.analysis.symbols")
 local ast_walk = require("teal_language_server.analysis.diagnostics.ast_walk")
+local semantic = require("teal_language_server.analysis.semantic")
+local completion = require("teal_language_server.analysis.completion")
 
 local logger = logging.get_logger(_module_name)
 
@@ -24,6 +26,15 @@ local teal_parser = teal_language:parser()
 
 local tl = require("tl")
 local lfs = require("lfs")
+
+
+
+
+
+
+
+
+
 
 
 
@@ -136,9 +147,17 @@ function Document:_get_ast(tokens)
    return cache.ast, cache.parse_errors
 end
 
+
+
+function Document:_forget_report_entries()
+   local tr = self._server_state:get_env().reporter:get_report()
+   tr.by_pos[self._uri.path] = nil
+   tr.symbols_by_file[self._uri.path] = nil
+end
+
 function Document:_get_result(ast)
    local cache = self._cache
-   if not cache.result then
+   if not cache.result and not cache.check_failed then
       local lax = is_lua(self._uri.path)
       logger:info("Type checking document%s %s", lax and " (lax)" or "", self._uri.path)
 
@@ -147,10 +166,46 @@ function Document:_get_result(ast)
          feat_arity = "on",
       }
 
-      cache.result = tl.check(
-      ast, self._uri.path, opts, self._server_state:get_env())
+
+      local ok, result = pcall(tl.check, ast, self._uri.path, opts, self._server_state:get_env())
+      if ok then
+         cache.result = result
+      else
+         logger:error("Type checking %s failed: %s", self._uri.path, tostring(result))
+         cache.check_failed = true
+         self:_forget_report_entries()
+      end
    end
    return cache.result
+end
+
+
+
+
+
+
+
+function Document:ensure_semantics()
+   local cache = self._cache
+   if cache.result or cache.check_failed then
+      return cache.result
+   end
+   local tks, lex_errs = self:_get_tokens()
+   local ast, parse_errs = self:_get_ast(tks)
+   cache.recovered = #lex_errs > 0 or #parse_errs > 0
+   if ast == nil then
+      cache.check_failed = true
+      self:_forget_report_entries()
+      return nil
+   end
+   return self:_get_result(ast)
+end
+
+
+
+function Document:is_recovered()
+   self:ensure_semantics()
+   return self._cache.recovered == true
 end
 
 function Document:get_type_report()
@@ -360,13 +415,17 @@ function Document:get_problems()
       settings = self._server_state.lint_settings,
    }
    logger:debug("Detected %d lex errors", #lex_errs)
+
+
+
+   local result = self:ensure_semantics()
    if #lex_errs == 0 then
       local ast, parse_errs = self:_get_ast(tks)
       input.ast = ast
       input.parse_errors = parse_errs
       logger:debug("Detected %d parse errors", #parse_errs)
-      if #parse_errs == 0 then
-         input.result = self:_get_result(ast)
+      if #parse_errs == 0 and result then
+         input.result = result
          input.report = self:get_type_report()
       end
    end
@@ -888,6 +947,154 @@ end
 function Document:tree_sitter_token(y, x)
    self._tree_cursor:reset(self._tree:root())
    return self:_tree_sitter_token(y, x)
+end
+
+
+
+function Document:get_type_positions()
+   local cache = self._cache
+   if not cache.type_positions then
+      local ok, result = pcall(semantic.type_declaration_positions, self:get_ast())
+      cache.type_positions = ok and result or {}
+   end
+   return cache.type_positions
+end
+
+local type_node_kinds = {
+   simple_type = true,
+   table_type = true,
+   function_type = true,
+   return_type = true,
+   type_annotation = true,
+   type_index = true,
+   typeargs = true,
+}
+
+
+
+
+
+function Document:syntax_hint_at(line, col)
+   local function le(arow, acol, brow, bcol)
+      return arow < brow or (arow == brow and acol <= bcol)
+   end
+   local node = self._tree:root()
+   local chain = { node }
+   while true do
+      local nxt
+      for child in node:children() do
+         local sp = child:start_point()
+         local ep = child:end_point()
+         if le(sp.row, sp.column, line, col) and le(line, col, ep.row, ep.column) then
+            nxt = child
+         end
+      end
+      if nxt == nil then
+         break
+      end
+      node = nxt
+      table.insert(chain, node)
+   end
+   local hint = "code"
+   for i, n in ipairs(chain) do
+      local kind = n:type()
+      if kind == "comment" then
+         return "comment"
+      elseif kind == "string" then
+
+         local ep = n:end_point()
+         local src = n:source()
+         local closed = #src >= 2 and (src:sub(-1) == src:sub(1, 1) or src:sub(-1) == "]")
+         if not (closed and ep.row == line and ep.column == col) then
+            return "string"
+         end
+      elseif kind == "field" then
+         local key = n:child_by_field_name("key")
+         local next_node = chain[i + 1]
+         if key and next_node and next_node:start_point().column == key:start_point().column and
+            next_node:start_point().row == key:start_point().row then
+            return "name"
+         end
+         hint = "type"
+      elseif type_node_kinds[kind] then
+         hint = "type"
+      end
+   end
+   return hint
+end
+
+
+
+
+
+
+
+
+function Document:type_of_expression(key)
+   local report = self:get_type_report()
+   local ti = semantic.type_at_key(report, self._uri.path, key.y, key.x, key.ret_depth)
+   if ti or not key.has_call then
+      return ti
+   end
+   local cache = self._cache
+   cache.speculative = cache.speculative or {}
+   local tokens = self:get_tokens()
+   local first, last = tokens[key.first], tokens[key.last]
+   local cache_key = first.y .. ":" .. first.x .. ":" .. last.y .. ":" .. last.x
+   local cached = cache.speculative[cache_key]
+   if cached ~= nil then
+      return cached ~= false and cached or nil
+   end
+   cache.speculative[cache_key] = false
+   if #self._content > 512 * 1024 then
+      return nil
+   end
+
+   local lines = position.split_lines(self._content)
+   local last_end = last.x + #last.tk
+   if first.y == last.y then
+      local l = lines[first.y]
+      lines[first.y] = l:sub(1, first.x - 1) .. "(" .. l:sub(first.x, last_end - 1) .. ")" .. l:sub(last_end)
+   else
+      local lf, ll = lines[first.y], lines[last.y]
+      lines[first.y] = lf:sub(1, first.x - 1) .. "(" .. lf:sub(first.x)
+      lines[last.y] = ll:sub(1, last_end - 1) .. ")" .. ll:sub(last_end)
+   end
+   local text = table.concat(lines, "\n")
+
+   local env = self._server_state:get_env()
+   local spec_name = self._uri.path .. "#speculative"
+   local ok, err = pcall(function()
+      local tks = tl.lex(text, spec_name)
+      local ast = tl.parse_program(tks, {}, spec_name)
+      tl.check(ast, spec_name, {
+         feat_lax = is_lua(self._uri.path) and "on" or "off",
+         feat_arity = "on",
+      }, env)
+      return true
+   end)
+   if not ok then
+      logger:error("Speculative check of %s failed: %s", self._uri.path, tostring(err))
+   end
+   local rows = report.by_pos[spec_name]
+   local row = rows and rows[first.y]
+   local id = row and row[first.x]
+   if id then
+      ti = semantic.resolve(report, id)
+      if ti and ti.t == tl.typecodes.TYPE_VARIABLE then
+         ti = nil
+      end
+   end
+   report.by_pos[spec_name] = nil
+   report.symbols_by_file[spec_name] = nil
+   env.loaded[spec_name] = nil
+   for i = #env.loaded_order, 1, -1 do
+      if env.loaded_order[i] == spec_name then
+         table.remove(env.loaded_order, i)
+      end
+   end
+   cache.speculative[cache_key] = ti or false
+   return ti
 end
 
 class.setup(Document, "Document", {

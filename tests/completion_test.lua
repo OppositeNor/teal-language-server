@@ -718,12 +718,11 @@ tested.test("dot completion on an overloaded (POLY) function call result returns
     })
 end)
 
--- Known limitation (same root cause as the constrained-type-parameter test above
--- and the note at document.tl:352-357): tl records the generic return as a bare,
--- unconstrained type variable at the callee's position, so follow_rets hits the
--- TYPE_VARIABLE guard and bails, and the token-chain fallback can't resolve a call
--- either. Requires the tl-side fix (PR #74) to resolve.
-tested.test("dot completion on a top-level generic call result returns the inferred type's fields", {expected="FAIL"}, function()
+-- tl records the generic return at the callee as a bare type variable, so
+-- following the callee's return type fails. The server then checks a copy of
+-- the text with the call parenthesized; tl records the instantiated type of a
+-- parenthesized expression (Document:type_of_expression).
+tested.test("dot completion on a top-level generic call result returns the inferred type's fields", function()
     local uri = "file:///tmp/tls_complete_22.tl"
     -- at a top-level call site T is inferred to the concrete element type (Item),
     -- so following rets[1] should reach a real record; today it stays a type var.

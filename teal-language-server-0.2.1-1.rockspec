@@ -53,6 +53,8 @@ build = {
       ["teal_language_server.analysis.symbols"] = "gen/teal_language_server/analysis/symbols.lua",
       ["teal_language_server.analysis.references"] = "gen/teal_language_server/analysis/references.lua",
       ["teal_language_server.analysis.inlay_hints"] = "gen/teal_language_server/analysis/inlay_hints.lua",
+      ["teal_language_server.analysis.semantic"] = "gen/teal_language_server/analysis/semantic.lua",
+      ["teal_language_server.analysis.completion"] = "gen/teal_language_server/analysis/completion.lua",
       ["teal_language_server.analysis.workspace_index"] = "gen/teal_language_server/analysis/workspace_index.lua",
 
       -- diagnostics engine and lint rules

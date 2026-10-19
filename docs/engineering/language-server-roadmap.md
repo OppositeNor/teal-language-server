@@ -1,5 +1,7 @@
 # Teal Language Server — Target Architecture and Roadmap
 
+> Milestones after M8: `implementation-roadmap.md`. The semantic layer used by completion and signature help: `semantic-architecture.md`.
+
 This plan builds on the gap analysis in `language-server-gap-analysis.md`. It extends the existing
 server step by step and does not replace it. The `tl` compiler remains the only source of
 syntax and semantic truth. tree-sitter is used only to find the cursor context in incomplete code.

@@ -23,7 +23,8 @@ local function get_root_uri()
     return "file:///tmp"
 end
 
-function LspClient.new(server_binary)
+-- `server_args` defaults to { "--coverage" } (what the test suite uses).
+function LspClient.new(server_binary, server_args)
     local self = setmetatable({}, LspClient)
     self._buffer = ""
     self._pending = {}
@@ -40,7 +41,7 @@ function LspClient.new(server_binary)
     self._exit_info = nil
 
     local spawn_path = server_binary
-    local spawn_args = { "--coverage" }
+    local spawn_args = server_args or { "--coverage" }
     local spawn_env = nil
     if IS_WINDOWS then
         -- Bypass the luarocks-generated .bat wrapper. libuv spawns .bat files
@@ -52,8 +53,10 @@ function LspClient.new(server_binary)
         spawn_path = uv.exepath()
         spawn_args = {
             uv.cwd() .. "\\bin\\teal-language-server",
-            "--coverage",
         }
+        for _, a in ipairs(server_args or { "--coverage" }) do
+            table.insert(spawn_args, a)
+        end
 
         -- Derive a clean LUA_PATH/LUA_CPATH from the venv structure instead
         -- of using package.path/cpath directly. When running under

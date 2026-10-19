@@ -15,6 +15,8 @@ local fixer <const> = require("teal_language_server.analysis.diagnostics.fixer")
 local linter <const> = require("teal_language_server.analysis.diagnostics.linter")
 local doc_symbols <const> = require("teal_language_server.analysis.symbols")
 local ast_walk <const> = require("teal_language_server.analysis.diagnostics.ast_walk")
+local semantic <const> = require("teal_language_server.analysis.semantic")
+local completion <const> = require("teal_language_server.analysis.completion")
 
 local logger = logging.get_logger(_module_name)
 
@@ -33,9 +35,18 @@ local record Cache
    parse_errors: {tl.Error}
 
    result: tl.Result
+   -- the type checker raised on this text; no semantic data is available
+   check_failed: boolean
+   -- the result was computed from an AST the parser recovered from syntax
+   -- errors: types of the parsed parts are the checker's own, but code the
+   -- parser skipped has none
+   recovered: boolean
 
    problems: {problem.Problem}
    symbols: {doc_symbols.Symbol}
+   type_positions: {string:string}
+   -- receiver types found by a speculative check, by "y:x:depth"
+   speculative: {string:tl.TypeInfo|boolean}
 end
 
 local record Document
@@ -136,9 +147,17 @@ function Document:_get_ast(tokens?: {tl.Token}): tl.Node, {tl.Error}
    return cache.ast, cache.parse_errors
 end
 
+-- Drops what the shared type report holds for this file, so that queries
+-- cannot answer from an earlier version's positions.
+function Document:_forget_report_entries()
+   local tr = self._server_state:get_env().reporter:get_report()
+   tr.by_pos[self._uri.path] = nil
+   tr.symbols_by_file[self._uri.path] = nil
+end
+
 function Document:_get_result(ast: tl.Node): tl.Result
    local cache = self._cache
-   if not cache.result then
+   if not cache.result and not cache.check_failed then
       local lax = is_lua(self._uri.path)
       logger:info("Type checking document%s %s", lax and " (lax)" or "", self._uri.path)
 
@@ -147,10 +166,46 @@ function Document:_get_result(ast: tl.Node): tl.Result
          feat_arity = "on",
       }
 
-      cache.result = tl.check(
-         ast, self._uri.path, opts, self._server_state:get_env())
+      -- a recovered AST can contain shapes the checker does not expect
+      local ok, result = pcall(tl.check, ast, self._uri.path, opts, self._server_state:get_env())
+      if ok then
+         cache.result = result as tl.Result
+      else
+         logger:error("Type checking %s failed: %s", self._uri.path, tostring(result))
+         cache.check_failed = true
+         self:_forget_report_entries()
+      end
    end
    return cache.result
+end
+
+-- Brings the semantic data of the current text up to date: lexes, parses
+-- and type checks it. Unlike diagnostics, which stop at the first failing
+-- stage, the checker also runs on an AST recovered from syntax errors, since
+-- that is the normal state of a buffer while typing (`p.` before the field
+-- name). The by_pos / symbols_by_file entries of this file then describe the
+-- current text, never a previous version.
+function Document:ensure_semantics(): tl.Result
+   local cache = self._cache
+   if cache.result or cache.check_failed then
+      return cache.result
+   end
+   local tks, lex_errs = self:_get_tokens()
+   local ast, parse_errs = self:_get_ast(tks)
+   cache.recovered = #lex_errs > 0 or #parse_errs > 0
+   if ast == nil then
+      cache.check_failed = true
+      self:_forget_report_entries()
+      return nil
+   end
+   return self:_get_result(ast)
+end
+
+-- True when the semantic data comes from a recovered (syntactically
+-- invalid) text. Its types are real checker output for the parsed parts.
+function Document:is_recovered(): boolean
+   self:ensure_semantics()
+   return self._cache.recovered == true
 end
 
 function Document:get_type_report(): tl.TypeReport
@@ -360,13 +415,17 @@ function Document:get_problems(): {problem.Problem}
       settings = self._server_state.lint_settings,
    }
    logger:debug("Detected %d lex errors", #lex_errs)
+   -- semantic data is computed even for broken text, but the engine only
+   -- sees the stages diagnostics are reported for: type errors of a
+   -- recovered parse would mostly be follow-on noise
+   local result = self:ensure_semantics()
    if #lex_errs == 0 then
       local ast, parse_errs = self:_get_ast(tks)
       input.ast = ast
       input.parse_errors = parse_errs
       logger:debug("Detected %d parse errors", #parse_errs)
-      if #parse_errs == 0 then
-         input.result = self:_get_result(ast)
+      if #parse_errs == 0 and result then
+         input.result = result
          input.report = self:get_type_report()
       end
    end
@@ -888,6 +947,154 @@ end
 function Document:tree_sitter_token(y: integer, x: integer): Document.NodeInfo
    self._tree_cursor:reset(self._tree:root())
    return self:_tree_sitter_token(y, x)
+end
+
+-- Positions of names declared as types in this document (see
+-- semantic.type_declaration_positions).
+function Document:get_type_positions(): {string:string}
+   local cache = self._cache
+   if not cache.type_positions then
+      local ok, result = pcall(semantic.type_declaration_positions, self:get_ast())
+      cache.type_positions = ok and result as {string:string} or {}
+   end
+   return cache.type_positions
+end
+
+local type_node_kinds <const>: {string:boolean} = {
+   simple_type = true,
+   table_type = true,
+   function_type = true,
+   return_type = true,
+   type_annotation = true,
+   type_index = true,
+   typeargs = true,
+}
+
+-- What kind of text the 0-based byte position (line, col) is in, according to
+-- tree-sitter's error-tolerant tree: "comment", "string", "type" (a type
+-- annotation, cast or field type), "name" (the name of a record field being
+-- declared) or "code".
+function Document:syntax_hint_at(line: integer, col: integer): completion.SyntaxHint
+   local function le(arow: integer, acol: integer, brow: integer, bcol: integer): boolean
+      return arow < brow or (arow == brow and acol <= bcol)
+   end
+   local node = self._tree:root()
+   local chain: {ltreesitter.Node} = { node }
+   while true do
+      local nxt: ltreesitter.Node
+      for child in node:children() do
+         local sp = child:start_point()
+         local ep = child:end_point()
+         if le(sp.row, sp.column, line, col) and le(line, col, ep.row, ep.column) then
+            nxt = child
+         end
+      end
+      if nxt == nil then
+         break
+      end
+      node = nxt
+      table.insert(chain, node)
+   end
+   local hint: completion.SyntaxHint = "code"
+   for i, n in ipairs(chain) do
+      local kind = n:type()
+      if kind == "comment" then
+         return "comment"
+      elseif kind == "string" then
+         -- the cursor right after a closing quote is outside the string
+         local ep = n:end_point()
+         local src = n:source()
+         local closed = #src >= 2 and (src:sub(-1) == src:sub(1, 1) or src:sub(-1) == "]")
+         if not (closed and ep.row == line and ep.column == col) then
+            return "string"
+         end
+      elseif kind == "field" then
+         local key = n:child_by_field_name("key")
+         local next_node = chain[i + 1]
+         if key and next_node and next_node:start_point().column == key:start_point().column
+            and next_node:start_point().row == key:start_point().row then
+            return "name"
+         end
+         hint = "type"
+      elseif type_node_kinds[kind] then
+         hint = "type"
+      end
+   end
+   return hint
+end
+
+-- The type of an expression located by semantic.expression_key. tl does not
+-- record call results, and following the callee's return type fails for
+-- overloaded and generic callees, so a call expression that misses is checked
+-- once more in a speculative copy of the text where it is parenthesized:
+-- tl records a parenthesized expression's (instantiated) type at its "(".
+-- The copy is checked under a separate file name, and its entries are
+-- removed from the shared report afterwards.
+function Document:type_of_expression(key: semantic.ExprKey): tl.TypeInfo
+   local report = self:get_type_report()
+   local ti = semantic.type_at_key(report, self._uri.path, key.y, key.x, key.ret_depth)
+   if ti or not key.has_call then
+      return ti
+   end
+   local cache = self._cache
+   cache.speculative = cache.speculative or {}
+   local tokens = self:get_tokens()
+   local first, last = tokens[key.first], tokens[key.last]
+   local cache_key = first.y .. ":" .. first.x .. ":" .. last.y .. ":" .. last.x
+   local cached = cache.speculative[cache_key]
+   if cached ~= nil then
+      return cached ~= false and cached as tl.TypeInfo or nil
+   end
+   cache.speculative[cache_key] = false
+   if #self._content > 512 * 1024 then
+      return nil
+   end
+
+   local lines = position.split_lines(self._content)
+   local last_end = last.x + #last.tk
+   if first.y == last.y then
+      local l = lines[first.y]
+      lines[first.y] = l:sub(1, first.x - 1) .. "(" .. l:sub(first.x, last_end - 1) .. ")" .. l:sub(last_end)
+   else
+      local lf, ll = lines[first.y], lines[last.y]
+      lines[first.y] = lf:sub(1, first.x - 1) .. "(" .. lf:sub(first.x)
+      lines[last.y] = ll:sub(1, last_end - 1) .. ")" .. ll:sub(last_end)
+   end
+   local text = table.concat(lines, "\n")
+
+   local env = self._server_state:get_env()
+   local spec_name = self._uri.path .. "#speculative"
+   local ok, err = pcall(function(): boolean
+      local tks = tl.lex(text, spec_name)
+      local ast = tl.parse_program(tks, {}, spec_name)
+      tl.check(ast, spec_name, {
+         feat_lax = is_lua(self._uri.path) and "on" or "off",
+         feat_arity = "on",
+      }, env)
+      return true
+   end)
+   if not ok then
+      logger:error("Speculative check of %s failed: %s", self._uri.path, tostring(err))
+   end
+   local rows = report.by_pos[spec_name]
+   local row = rows and rows[first.y]
+   local id = row and row[first.x]
+   if id then
+      ti = semantic.resolve(report, id)
+      if ti and ti.t == tl.typecodes.TYPE_VARIABLE then
+         ti = nil
+      end
+   end
+   report.by_pos[spec_name] = nil
+   report.symbols_by_file[spec_name] = nil
+   env.loaded[spec_name] = nil
+   for i = #env.loaded_order, 1, -1 do
+      if env.loaded_order[i] == spec_name then
+         table.remove(env.loaded_order, i)
+      end
+   end
+   cache.speculative[cache_key] = ti or false
+   return ti
 end
 
 class.setup(Document, "Document", {

@@ -1,5 +1,7 @@
 # Teal Language Server — Gap Analysis
 
+> Follow-up audit of semantic quality (completion, hover, navigation on unfinished code): `language-intelligence-audit.md`. Current per-feature status: `feature-matrix.md`.
+
 Audit date: 2026-10-18. Baseline: `teal-language-server` 0.2.1 (commit `ec1aaa3`),
 `tl` 0.24.8, Lua 5.4. Reference: the local `eslint` checkout (read-only).
 
