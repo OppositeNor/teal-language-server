@@ -20,6 +20,8 @@ handler_helper.indexable_parent_types = {
    ["index"] = true,
    ["method_index"] = true,
    ["function_name"] = true,
+
+   ["type_index"] = true,
 }
 
 

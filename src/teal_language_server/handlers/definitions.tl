@@ -9,6 +9,7 @@ local LspEventsManager <const> = require("teal_language_server.lsp.events_manage
 local Path <const> = require("teal_language_server.util.path")
 local Uri <const> = require("teal_language_server.util.uri")
 local position <const> = require("teal_language_server.util.position")
+local ast_walk <const> = require("teal_language_server.analysis.diagnostics.ast_walk")
 local lsp <const> = require("teal_language_server.lsp.protocol")
 local logging <const> = require("teal_language_server.logging")
 local class <const> = require("teal_language_server.util.class")
@@ -49,6 +50,38 @@ function DefinitionHandlers:__init(lsp_events_manager: LspEventsManager, lsp_rea
    self._document_manager = document_manager
 end
 
+local TYPE_KEYWORDS <const>: {string:boolean} = {
+   ["record"] = true,
+   ["enum"] = true,
+   ["interface"] = true,
+}
+
+-- tl records nested type declarations at their keyword (`record Name`); point
+-- at the name instead, like top-level declarations.
+local function past_type_keyword(tokens: {tl.Token}, y: integer, x: integer): integer, integer
+   if tokens == nil then
+      return y, x
+   end
+   local tok = ast_walk.token_at(tokens, y, x)
+   if tok and TYPE_KEYWORDS[tok.tk] then
+      local nxt = tokens[ast_walk.token_index_at(tokens, y, x) + 1]
+      if nxt and nxt.kind == "identifier" then
+         return nxt.y, nxt.x
+      end
+   end
+   return y, x
+end
+
+local function read_file(path: string): string
+   local fd = io.open(path, "rb")
+   if not fd then
+      return nil
+   end
+   local text = fd:read("*a")
+   fd:close()
+   return text
+end
+
 -- Resolves a (possibly relative) source file path to a Uri and replies to `id`
 -- with an LSP Location pointing at the 1-indexed (y, x). Returns true if a
 -- location was sent, false if `file` was nil (no location available).
@@ -78,11 +111,16 @@ function DefinitionHandlers:_send_location(id: integer, doc: Document, file: str
 
    local target_pos: lsp.Position
    if target_doc then
+      y, x = past_type_keyword(target_doc:get_tokens(), y, x)
       target_pos = target_doc:to_lsp_position(y, x)
    elseif lfs.attributes(file_uri.path, "mode") ~= "file" then
       -- e.g. tl's built-in declarations ("stdlib.d.tl"), which are not a file
       return false
    else
+      local text = read_file(file_uri.path)
+      if text then
+         y, x = past_type_keyword(tl.lex(text, file_uri.path), y, x)
+      end
       local line_text = position.read_file_line(file_uri.path, y - 1)
       target_pos = lsp.position(y - 1, position.byte_to_utf16(line_text, x - 1))
    end
@@ -155,6 +193,91 @@ function DefinitionHandlers:_required_module_location(doc: Document, pos: lsp.Po
    return { uri = Uri.tostring(Uri.uri_from_path(Path(path).value)), range = { start = start, ["end"] = start } }
 end
 
+local TYPE_SYMBOL_KINDS <const>: {string:boolean} = {
+   Class = true,
+   Interface = true,
+   Enum = true,
+   TypeParameter = true,
+}
+
+local function contains(s: symbols.Symbol, y: integer, x: integer): boolean
+   return (s.y < y or (s.y == y and s.x <= x)) and (y < s.yend or (y == s.yend and x < s.xend))
+end
+
+local function child_type(s: symbols.Symbol, name: string): symbols.Symbol
+   for _, c in ipairs(s.children or {}) do
+      if c.name == name and TYPE_SYMBOL_KINDS[c.kind] then
+         return c
+      end
+   end
+   return nil
+end
+
+-- Resolves a (possibly qualified) type name used inside record bodies, e.g.
+-- `p_params: RTParams` in a field's function type where RTParams is a sibling
+-- nested type. Such names are visible through the enclosing records rather
+-- than as variables in scope, so neither the compiler's scope list nor the
+-- type report resolves them. Searches the records enclosing (y, x), innermost
+-- first (the record itself, then its nested types), then the file's
+-- top-level types, and follows the remaining qualified parts.
+local function outline_type_declaration(outline: {symbols.Symbol}, tks: {string}, y: integer, x: integer): symbols.Symbol
+   if #tks == 0 then
+      return nil
+   end
+   local chain: {symbols.Symbol} = {}
+   local level = outline
+   while level do
+      local inner: symbols.Symbol
+      for _, s in ipairs(level) do
+         if TYPE_SYMBOL_KINDS[s.kind] and contains(s, y, x) then
+            inner = s
+            break
+         end
+      end
+      if inner == nil then
+         break
+      end
+      table.insert(chain, inner)
+      level = inner.children
+   end
+
+   local found: symbols.Symbol
+   for i = #chain, 1, -1 do
+      local scope = chain[i]
+      if scope.name == tks[1] then
+         found = scope
+      else
+         found = child_type(scope, tks[1])
+      end
+      if found then break end
+   end
+   if found == nil then
+      for _, s in ipairs(outline) do
+         if s.name == tks[1] and TYPE_SYMBOL_KINDS[s.kind] then
+            found = s
+            break
+         end
+      end
+   end
+   for i = 2, #tks do
+      if found == nil then
+         return nil
+      end
+      found = child_type(found, tks[i])
+   end
+   return found
+end
+
+-- Sends the location of a type name resolved through the outline (see
+-- outline_type_declaration); returns false if it does not resolve.
+function DefinitionHandlers:_send_outline_type_location(id: integer, doc: Document, tks: {string}, pos: lsp.Position): boolean
+   local decl = outline_type_declaration(doc:get_symbols(), tks, pos.line + 1, pos.character + 1)
+   if decl == nil then
+      return false
+   end
+   return self:_send_location(id, doc, doc.uri.path, decl.sel_y, decl.sel_x)
+end
+
 function DefinitionHandlers:_on_definition(params: lsp.Method.Params, id: integer): nil
    local pos <const> = handler_helper.byte_position(self._document_manager, params)
    local current = handler_helper.get_document(self._document_manager, params)
@@ -221,6 +344,12 @@ function DefinitionHandlers:_on_definition(params: lsp.Method.Params, id: intege
       end
    end
 
+   -- A type name used inside a record body (e.g. in a field's function type)
+   if self:_send_outline_type_location(id, doc, tks, pos) then
+      logger:trace("[on_definition] Resolved via the enclosing records' nested types")
+      return
+   end
+
    self._lsp_reader_writer:send_rpc(id, nil)
 end
 
@@ -248,9 +377,13 @@ function DefinitionHandlers:_on_type_definition(params: lsp.Method.Params, id: i
 
    logger:trace("[on_type_definition] Found type type_info: %s", type_info)
 
-   if not type_info or not self:_send_location(id, doc, type_info.file, type_info.y, type_info.x) then
-      self._lsp_reader_writer:send_rpc(id, nil)
+   if type_info and self:_send_location(id, doc, type_info.file, type_info.y, type_info.x) then
+      return
    end
+   if self:_send_outline_type_location(id, doc, tks, pos) then
+      return
+   end
+   self._lsp_reader_writer:send_rpc(id, nil)
 end
 
 function DefinitionHandlers:initialize()

@@ -1,4 +1,4 @@
-local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local pcall = _tl_compat and _tl_compat.pcall or pcall; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.definitions"
+local _tl_compat; if (tonumber((_VERSION or ''):match('[%d.]*$')) or 0) < 5.3 then local p, m = pcall(require, 'compat53.module'); if p then _tl_compat = m end end; local io = _tl_compat and _tl_compat.io or io; local ipairs = _tl_compat and _tl_compat.ipairs or ipairs; local pcall = _tl_compat and _tl_compat.pcall or pcall; local table = _tl_compat and _tl_compat.table or table; local _module_name = "handlers.definitions"
 
 local handler_helper = require("teal_language_server.handlers.handler_helper")
 local DocumentManager = require("teal_language_server.analysis.document_manager")
@@ -9,6 +9,7 @@ local LspEventsManager = require("teal_language_server.lsp.events_manager")
 local Path = require("teal_language_server.util.path")
 local Uri = require("teal_language_server.util.uri")
 local position = require("teal_language_server.util.position")
+local ast_walk = require("teal_language_server.analysis.diagnostics.ast_walk")
 local lsp = require("teal_language_server.lsp.protocol")
 local logging = require("teal_language_server.logging")
 local class = require("teal_language_server.util.class")
@@ -49,6 +50,38 @@ function DefinitionHandlers:__init(lsp_events_manager, lsp_reader_writer, server
    self._document_manager = document_manager
 end
 
+local TYPE_KEYWORDS = {
+   ["record"] = true,
+   ["enum"] = true,
+   ["interface"] = true,
+}
+
+
+
+local function past_type_keyword(tokens, y, x)
+   if tokens == nil then
+      return y, x
+   end
+   local tok = ast_walk.token_at(tokens, y, x)
+   if tok and TYPE_KEYWORDS[tok.tk] then
+      local nxt = tokens[ast_walk.token_index_at(tokens, y, x) + 1]
+      if nxt and nxt.kind == "identifier" then
+         return nxt.y, nxt.x
+      end
+   end
+   return y, x
+end
+
+local function read_file(path)
+   local fd = io.open(path, "rb")
+   if not fd then
+      return nil
+   end
+   local text = fd:read("*a")
+   fd:close()
+   return text
+end
+
 
 
 
@@ -78,11 +111,16 @@ function DefinitionHandlers:_send_location(id, doc, file, y, x)
 
    local target_pos
    if target_doc then
+      y, x = past_type_keyword(target_doc:get_tokens(), y, x)
       target_pos = target_doc:to_lsp_position(y, x)
    elseif lfs.attributes(file_uri.path, "mode") ~= "file" then
 
       return false
    else
+      local text = read_file(file_uri.path)
+      if text then
+         y, x = past_type_keyword(tl.lex(text, file_uri.path), y, x)
+      end
       local line_text = position.read_file_line(file_uri.path, y - 1)
       target_pos = lsp.position(y - 1, position.byte_to_utf16(line_text, x - 1))
    end
@@ -155,6 +193,91 @@ function DefinitionHandlers:_required_module_location(doc, pos)
    return { uri = Uri.tostring(Uri.uri_from_path(Path(path).value)), range = { start = start, ["end"] = start } }
 end
 
+local TYPE_SYMBOL_KINDS = {
+   Class = true,
+   Interface = true,
+   Enum = true,
+   TypeParameter = true,
+}
+
+local function contains(s, y, x)
+   return (s.y < y or (s.y == y and s.x <= x)) and (y < s.yend or (y == s.yend and x < s.xend))
+end
+
+local function child_type(s, name)
+   for _, c in ipairs(s.children or {}) do
+      if c.name == name and TYPE_SYMBOL_KINDS[c.kind] then
+         return c
+      end
+   end
+   return nil
+end
+
+
+
+
+
+
+
+
+local function outline_type_declaration(outline, tks, y, x)
+   if #tks == 0 then
+      return nil
+   end
+   local chain = {}
+   local level = outline
+   while level do
+      local inner
+      for _, s in ipairs(level) do
+         if TYPE_SYMBOL_KINDS[s.kind] and contains(s, y, x) then
+            inner = s
+            break
+         end
+      end
+      if inner == nil then
+         break
+      end
+      table.insert(chain, inner)
+      level = inner.children
+   end
+
+   local found
+   for i = #chain, 1, -1 do
+      local scope = chain[i]
+      if scope.name == tks[1] then
+         found = scope
+      else
+         found = child_type(scope, tks[1])
+      end
+      if found then break end
+   end
+   if found == nil then
+      for _, s in ipairs(outline) do
+         if s.name == tks[1] and TYPE_SYMBOL_KINDS[s.kind] then
+            found = s
+            break
+         end
+      end
+   end
+   for i = 2, #tks do
+      if found == nil then
+         return nil
+      end
+      found = child_type(found, tks[i])
+   end
+   return found
+end
+
+
+
+function DefinitionHandlers:_send_outline_type_location(id, doc, tks, pos)
+   local decl = outline_type_declaration(doc:get_symbols(), tks, pos.line + 1, pos.character + 1)
+   if decl == nil then
+      return false
+   end
+   return self:_send_location(id, doc, doc.uri.path, decl.sel_y, decl.sel_x)
+end
+
 function DefinitionHandlers:_on_definition(params, id)
    local pos = handler_helper.byte_position(self._document_manager, params)
    local current = handler_helper.get_document(self._document_manager, params)
@@ -221,6 +344,12 @@ function DefinitionHandlers:_on_definition(params, id)
       end
    end
 
+
+   if self:_send_outline_type_location(id, doc, tks, pos) then
+      logger:trace("[on_definition] Resolved via the enclosing records' nested types")
+      return
+   end
+
    self._lsp_reader_writer:send_rpc(id, nil)
 end
 
@@ -248,9 +377,13 @@ function DefinitionHandlers:_on_type_definition(params, id)
 
    logger:trace("[on_type_definition] Found type type_info: %s", type_info)
 
-   if not type_info or not self:_send_location(id, doc, type_info.file, type_info.y, type_info.x) then
-      self._lsp_reader_writer:send_rpc(id, nil)
+   if type_info and self:_send_location(id, doc, type_info.file, type_info.y, type_info.x) then
+      return
    end
+   if self:_send_outline_type_location(id, doc, tks, pos) then
+      return
+   end
+   self._lsp_reader_writer:send_rpc(id, nil)
 end
 
 function DefinitionHandlers:initialize()

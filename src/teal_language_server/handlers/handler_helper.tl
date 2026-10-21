@@ -20,6 +20,8 @@ handler_helper.indexable_parent_types = {
    ["index"] = true,
    ["method_index"] = true,
    ["function_name"] = true,
+   -- qualified type names in annotations, e.g. `p: mod.Record`
+   ["type_index"] = true,
 }
 
 -- The request's document, analyzed against its current text. Diagnostics are
