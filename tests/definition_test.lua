@@ -199,4 +199,81 @@ tested.test("definition of nested type names used inside record bodies", functio
     tested.assert({ given = "the field name canvas", should = "not jump to the record Canvas", expected = true, actual = where(client:get_definition(uri, 16, 9)) ~= f .. ":11:11" })
 end)
 
+-- Location(s) of a definition/implementation result as "file:line:col", sorted
+local function wheres(response)
+    local r = response and response.result
+    if r == nil or r == cjson_null then
+        return "none"
+    end
+    if r.uri then
+        r = { r }
+    end
+    local out = {}
+    for _, l in ipairs(r) do
+        table.insert(out, string.format("%s:%d:%d", l.uri:match("([^/]+)$"), l.range.start.line, l.range.start.character))
+    end
+    table.sort(out)
+    return table.concat(out, " ")
+end
+
+tested.test("definition on a field declaration jumps to its implementation (same file)", function()
+    local uri = "file:///tmp/tls_def_impl_same.tl"
+    client:open_document(uri, table.concat({
+        "local record Shape",                                    -- 0
+        "   area: function(self: Shape): number",                -- 1
+        "   scale: function(self: Shape, by: number)",           -- 2
+        "   name: function(self: Shape): string",                -- 3
+        "   w: number",                                          -- 4
+        "end",                                                   -- 5
+        "function Shape:area(): number",                         -- 6
+        "   return self.w",                                      -- 7
+        "end",                                                   -- 8
+        "Shape.scale = function(self: Shape, by: number)",       -- 9
+        "   self.w = self.w * by",                               -- 10
+        "end",                                                   -- 11
+        "return Shape",                                          -- 12
+    }, "\n"))
+    client:wait_for_notification("textDocument/publishDiagnostics")
+    local f = "tls_def_impl_same.tl"
+    tested.assert({ given = "declaration of area", should = "jump to function Shape:area", expected = f .. ":6:15", actual = wheres(client:get_definition(uri, 1, 4)) })
+    tested.assert({ given = "declaration of scale", should = "jump to the Shape.scale = function assignment", expected = f .. ":9:6", actual = wheres(client:get_definition(uri, 2, 4)) })
+    tested.assert({ given = "a declared method without implementation", should = "stay on its declaration", expected = f .. ":3:3", actual = wheres(client:get_definition(uri, 3, 4)) })
+    tested.assert({ given = "a plain field", should = "stay on its declaration", expected = f .. ":4:3", actual = wheres(client:get_definition(uri, 4, 3)) })
+end)
+
+tested.test("declaration in a .d.tl jumps to the implementation in a file that is not open", function()
+    client:shutdown()
+    local dir = project.create({
+        ["graph.d.tl"] = table.concat({
+            "local record graph",                                -- 0
+            "   record Graph",                                   -- 1
+            "      compute: function(self: Graph, n: integer): integer", -- 2
+            "   end",                                            -- 3
+            "   new: function(): Graph",                         -- 4
+            "end",                                               -- 5
+            "return graph",                                      -- 6
+        }, "\n"),
+        ["graph_impl.tl"] = table.concat({
+            'local graph = require("graph")',                    -- 0
+            "local Graph = graph.Graph",                         -- 1
+            "function Graph:compute(n: integer): integer",       -- 2
+            "   return n",                                       -- 3
+            "end",                                               -- 4
+            "return Graph",                                      -- 5
+        }, "\n"),
+    })
+    client = LspClient.new("teal-language-server")
+    client:initialize("file://" .. dir)
+    local uri = "file://" .. dir .. "/graph.d.tl"
+    client:open_document(uri, project.read(dir, "graph.d.tl"))
+    client:wait_for_notification("textDocument/publishDiagnostics")
+
+    tested.assert({ given = "declaration of compute (implementation file closed)", should = "jump into graph_impl.tl", expected = "graph_impl.tl:2:15", actual = wheres(client:get_definition(uri, 2, 9)) })
+    local id = client:request("textDocument/implementation", { textDocument = { uri = uri }, position = { line = 2, character = 9 } })
+    tested.assert({ given = "textDocument/implementation on compute", should = "list the implementation", expected = "graph_impl.tl:2:15", actual = wheres(client:wait_for_response(id)) })
+    id = client:request("textDocument/implementation", { textDocument = { uri = uri }, position = { line = 1, character = 11 } })
+    tested.assert({ given = "textDocument/implementation on a record name", should = "return an empty list", expected = "", actual = wheres(client:wait_for_response(id)) })
+    project.remove(dir)
+end)
+
 return tested

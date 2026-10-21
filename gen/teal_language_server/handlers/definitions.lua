@@ -15,6 +15,7 @@ local logging = require("teal_language_server.logging")
 local class = require("teal_language_server.util.class")
 local references = require("teal_language_server.analysis.references")
 local symbols = require("teal_language_server.analysis.symbols")
+local NavigationHandlers = require("teal_language_server.handlers.navigation")
 local semantic = require("teal_language_server.analysis.semantic")
 local tl = require("tl")
 local lfs = require("lfs")
@@ -43,11 +44,14 @@ local DefinitionHandlers = {}
 
 
 
-function DefinitionHandlers:__init(lsp_events_manager, lsp_reader_writer, server_state, document_manager)
+
+
+function DefinitionHandlers:__init(lsp_events_manager, lsp_reader_writer, server_state, document_manager, navigation)
    self._lsp_events_manager = lsp_events_manager
    self._lsp_reader_writer = lsp_reader_writer
    self._server_state = server_state
    self._document_manager = document_manager
+   self._navigation = navigation
 end
 
 local TYPE_KEYWORDS = {
@@ -285,6 +289,16 @@ function DefinitionHandlers:_on_definition(params, id)
       local module_location = self:_required_module_location(current, pos)
       if module_location then
          self._lsp_reader_writer:send_rpc(id, module_location)
+         return
+      end
+
+      local impls = self._navigation and self._navigation:implementations_from_declaration(current, pos)
+      if impls then
+         if #impls == 1 then
+            self._lsp_reader_writer:send_rpc(id, impls[1])
+         else
+            self._lsp_reader_writer:send_rpc(id, impls)
+         end
          return
       end
       local locations = self:_semantic_definition(current, pos)

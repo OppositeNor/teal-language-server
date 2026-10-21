@@ -85,6 +85,7 @@ local capabilities = {
    },
    documentSymbolProvider = true,
    referencesProvider = true,
+   implementationProvider = true,
    documentHighlightProvider = true,
    workspaceSymbolProvider = true,
    inlayHintProvider = true,

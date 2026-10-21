@@ -104,6 +104,7 @@ local record lsp
          "textDocument/codeAction"
          "textDocument/documentSymbol"
          "textDocument/references"
+         "textDocument/implementation"
          "textDocument/documentHighlight"
          "textDocument/prepareRename"
          "textDocument/rename"

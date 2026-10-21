@@ -15,6 +15,7 @@ local logging <const> = require("teal_language_server.logging")
 local class <const> = require("teal_language_server.util.class")
 local references <const> = require("teal_language_server.analysis.references")
 local symbols <const> = require("teal_language_server.analysis.symbols")
+local NavigationHandlers <const> = require("teal_language_server.handlers.navigation")
 local semantic <const> = require("teal_language_server.analysis.semantic")
 local tl <const> = require("tl")
 local lfs <const> = require("lfs")
@@ -36,18 +37,21 @@ end
 
 local record DefinitionHandlers
    _document_manager: DocumentManager
+   -- workspace search, for jumping from a declaration to its implementation
+   _navigation: NavigationHandlers
    _server_state: ServerState
    _lsp_reader_writer: LspReaderWriter
    _lsp_events_manager: LspEventsManager
 
-   metamethod __call: function(self: DefinitionHandlers, lsp_events_manager: LspEventsManager, lsp_reader_writer: LspReaderWriter, server_state: ServerState, document_manager: DocumentManager): DefinitionHandlers
+   metamethod __call: function(self: DefinitionHandlers, lsp_events_manager: LspEventsManager, lsp_reader_writer: LspReaderWriter, server_state: ServerState, document_manager: DocumentManager, navigation?: NavigationHandlers): DefinitionHandlers
 end
 
-function DefinitionHandlers:__init(lsp_events_manager: LspEventsManager, lsp_reader_writer: LspReaderWriter, server_state: ServerState, document_manager: DocumentManager)
+function DefinitionHandlers:__init(lsp_events_manager: LspEventsManager, lsp_reader_writer: LspReaderWriter, server_state: ServerState, document_manager: DocumentManager, navigation?: NavigationHandlers)
    self._lsp_events_manager = lsp_events_manager
    self._lsp_reader_writer = lsp_reader_writer
    self._server_state = server_state
    self._document_manager = document_manager
+   self._navigation = navigation
 end
 
 local TYPE_KEYWORDS <const>: {string:boolean} = {
@@ -285,6 +289,16 @@ function DefinitionHandlers:_on_definition(params: lsp.Method.Params, id: intege
       local module_location = self:_required_module_location(current, pos)
       if module_location then
          self._lsp_reader_writer:send_rpc(id, module_location)
+         return
+      end
+      -- on a field's declaration, go to its implementation(s)
+      local impls = self._navigation and self._navigation:implementations_from_declaration(current, pos)
+      if impls then
+         if #impls == 1 then
+            self._lsp_reader_writer:send_rpc(id, impls[1])
+         else
+            self._lsp_reader_writer:send_rpc(id, impls as {string:any})
+         end
          return
       end
       local locations = self:_semantic_definition(current, pos)

@@ -132,9 +132,10 @@ function MiscHandlers:initialize()
 
    DocumentSyncHandlers(self._lsp_events_manager, self._document_manager, self._env_updater):initialize()
    LanguageFeatureHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._document_manager, self._server_state):initialize()
-   DefinitionHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager):initialize()
+   local navigation = NavigationHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager)
+   DefinitionHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager, navigation):initialize()
    CodeActionHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager):initialize()
-   NavigationHandlers(self._lsp_events_manager, self._lsp_reader_writer, self._server_state, self._document_manager):initialize()
+   navigation:initialize()
 end
 
 class.setup(MiscHandlers, "MiscHandlers", {

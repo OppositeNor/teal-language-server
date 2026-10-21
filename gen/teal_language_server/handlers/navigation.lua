@@ -281,6 +281,7 @@ end
 
 local highlight_kind = {
    decl = 3,
+   impl = 3,
    write = 3,
    read = 2,
 }
@@ -438,9 +439,69 @@ function NavigationHandlers:_on_workspace_symbol(params, id)
    self._lsp_reader_writer:send_rpc(id, result)
 end
 
+
+
+
+function NavigationHandlers:implementations_at(doc, pos)
+   local normalize = function(p) return self:_normalize(p) end
+   local ok, target = pcall(references.resolve_target, self:_view(doc), normalize, pos.line + 1, pos.character + 1)
+   if not ok or target == nil or (target).kind ~= "field" then
+      return nil
+   end
+   local out = {}
+   for _, loc in ipairs((self:_find(target, doc))) do
+      if loc.kind == "impl" then
+         table.insert(out, {
+            uri = Uri.tostring(Uri.uri_from_path(loc.file)),
+            range = self:_lsp_range(loc.file, loc.y, loc.x, loc.yend, loc.xend),
+         })
+      end
+   end
+   return out
+end
+
+
+
+
+function NavigationHandlers:implementations_from_declaration(doc, pos)
+   local normalize = function(p) return self:_normalize(p) end
+   local loader = function(p) return self:_load_symbols(p) end
+   local ok, target = pcall(references.resolve_target, self:_view(doc), normalize, pos.line + 1, pos.character + 1)
+   if not ok or target == nil or (target).kind ~= "field" then
+      return nil
+   end
+   local t = target
+   local on_declaration = false
+   for _, decl in ipairs(references.declarations(t, loader)) do
+      if decl.kind == "decl" and self:_normalize(decl.file) == doc.uri.path and decl.y == t.y and decl.x == t.x then
+         on_declaration = true
+      end
+   end
+   if not on_declaration then
+      return nil
+   end
+   local impls = self:implementations_at(doc, pos)
+   if impls == nil or #impls == 0 then
+      return nil
+   end
+   return impls
+end
+
+function NavigationHandlers:_on_implementation(params, id)
+   local doc = handler_helper.get_document(self._document_manager, params)
+   local result
+   if doc then
+      result = self:implementations_at(doc, handler_helper.byte_position(self._document_manager, params))
+   end
+   result = result or {}
+   setmetatable(result, json.empty_array_mt)
+   self._lsp_reader_writer:send_rpc(id, result)
+end
+
 function NavigationHandlers:initialize()
    self._lsp_events_manager:set_handler("textDocument/documentSymbol", function(params, id) self:_on_document_symbol(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/references", function(params, id) self:_on_references(params, id) end)
+   self._lsp_events_manager:set_handler("textDocument/implementation", function(params, id) self:_on_implementation(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/documentHighlight", function(params, id) self:_on_document_highlight(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/prepareRename", function(params, id) self:_on_prepare_rename(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/rename", function(params, id) self:_on_rename(params, id) end)

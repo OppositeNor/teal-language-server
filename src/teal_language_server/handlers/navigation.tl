@@ -281,6 +281,7 @@ end
 
 local highlight_kind: {references.LocationKind:integer} = {
    decl = 3, -- Write
+   impl = 3,
    write = 3,
    read = 2, -- Read
 }
@@ -438,9 +439,69 @@ function NavigationHandlers:_on_workspace_symbol(params: lsp.Method.Params, id: 
    self._lsp_reader_writer:send_rpc(id, result as {string:any})
 end
 
+-- Implementations (`function R:f()` / `R.f = function`) of the record field
+-- under the cursor, across the workspace, as LSP Locations. Nil when the
+-- cursor is not on a record field.
+function NavigationHandlers:implementations_at(doc: Document, pos: lsp.Position): {{string:any}}
+   local normalize = function(p: string): string return self:_normalize(p) end
+   local ok, target = pcall(references.resolve_target, self:_view(doc), normalize, pos.line + 1, pos.character + 1)
+   if not ok or target == nil or (target as references.Target).kind ~= "field" then
+      return nil
+   end
+   local out: {{string:any}} = {}
+   for _, loc in ipairs((self:_find(target as references.Target, doc))) do
+      if loc.kind == "impl" then
+         table.insert(out, {
+            uri = Uri.tostring(Uri.uri_from_path(loc.file)),
+            range = self:_lsp_range(loc.file, loc.y, loc.x, loc.yend, loc.xend),
+         })
+      end
+   end
+   return out
+end
+
+-- When the cursor is on the declaration of a record field (in its record
+-- body), the field's implementations; nil otherwise. Go to definition uses
+-- this to jump from a declaration to its implementation, as clangd does.
+function NavigationHandlers:implementations_from_declaration(doc: Document, pos: lsp.Position): {{string:any}}
+   local normalize = function(p: string): string return self:_normalize(p) end
+   local loader = function(p: string): {symbols.Symbol} return self:_load_symbols(p) end
+   local ok, target = pcall(references.resolve_target, self:_view(doc), normalize, pos.line + 1, pos.character + 1)
+   if not ok or target == nil or (target as references.Target).kind ~= "field" then
+      return nil
+   end
+   local t = target as references.Target
+   local on_declaration = false
+   for _, decl in ipairs(references.declarations(t, loader)) do
+      if decl.kind == "decl" and self:_normalize(decl.file) == doc.uri.path and decl.y == t.y and decl.x == t.x then
+         on_declaration = true
+      end
+   end
+   if not on_declaration then
+      return nil
+   end
+   local impls = self:implementations_at(doc, pos)
+   if impls == nil or #impls == 0 then
+      return nil
+   end
+   return impls
+end
+
+function NavigationHandlers:_on_implementation(params: lsp.Method.Params, id: integer)
+   local doc = handler_helper.get_document(self._document_manager, params)
+   local result: {{string:any}}
+   if doc then
+      result = self:implementations_at(doc, handler_helper.byte_position(self._document_manager, params))
+   end
+   result = result or {}
+   setmetatable(result, json.empty_array_mt as metatable<{{string:any}}>)
+   self._lsp_reader_writer:send_rpc(id, result as {string:any})
+end
+
 function NavigationHandlers:initialize()
    self._lsp_events_manager:set_handler("textDocument/documentSymbol", function(params: lsp.Method.Params, id: integer) self:_on_document_symbol(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/references", function(params: lsp.Method.Params, id: integer) self:_on_references(params, id) end)
+   self._lsp_events_manager:set_handler("textDocument/implementation", function(params: lsp.Method.Params, id: integer) self:_on_implementation(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/documentHighlight", function(params: lsp.Method.Params, id: integer) self:_on_document_highlight(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/prepareRename", function(params: lsp.Method.Params, id: integer) self:_on_prepare_rename(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/rename", function(params: lsp.Method.Params, id: integer) self:_on_rename(params, id) end)

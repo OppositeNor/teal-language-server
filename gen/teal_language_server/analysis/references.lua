@@ -80,6 +80,8 @@ local references = { Target = {}, Location = {}, View = {} }
 
 
 
+
+
 local NAME_KINDS = {
    variable = true,
    identifier = true,
@@ -293,10 +295,16 @@ end
 
 local function field_symbol_at(list, y, x, container)
    for _, s in ipairs(list or {}) do
-      if s.sel_y == y and x >= s.sel_x and x < s.sel_xend and container and
-         (container.kind == "Class" or container.kind == "Interface") and
-         (s.kind == "Field" or s.kind == "Method") then
-         return container, s
+      if container and (container.kind == "Class" or container.kind == "Interface") then
+         if s.sel_y == y and x >= s.sel_x and x < s.sel_xend and (s.kind == "Field" or s.kind == "Method") then
+            return container, s
+         end
+
+
+         local d = s.declaration
+         if d and d.sel_y == y and x >= d.sel_x and x < d.sel_xend then
+            return container, d
+         end
       end
       local c, f = field_symbol_at(s.children, y, x, s)
       if c then return c, f end
@@ -471,6 +479,23 @@ local function record_key(view, normalize, ti)
    return nil
 end
 
+
+
+local function assigned_function(parents, access)
+   local list = parents[access]
+   local assignment = list and parents[list]
+   if not (list and list.kind == "variable_list" and assignment and assignment.kind == "assignment" and assignment.exps) then
+      return false
+   end
+   for i, var in ipairs(list) do
+      if var == access then
+         local exp = assignment.exps[i]
+         return exp ~= nil and exp.kind == "function"
+      end
+   end
+   return false
+end
+
 local function collect_fields(view, normalize, target, out, unresolved)
    local parents = parents_of(view)
    ast_walk.walk(view.ast, {
@@ -499,13 +524,13 @@ local function collect_fields(view, normalize, target, out, unresolved)
          if access then
             key = owner_key(view, normalize, access.e1, parents)
             if node.is_lvalue or access.is_lvalue then
-               kind = "write"
+               kind = assigned_function(parents, access) and "impl" or "write"
             end
          else
             local fn = record_function_of(parents, node)
             if fn then
                key = owner_key_of_record_function(view, normalize, fn, parents)
-               kind = "write"
+               kind = "impl"
             end
          end
          if key ~= nil and key == target.owner_key then
@@ -531,8 +556,11 @@ local function field_declarations(target, load_symbols)
    end
    for _, child in ipairs(owner.children or {}) do
       if child.name == target.name and (child.kind == "Field" or child.kind == "Method" or child.kind == "Function") then
-         table.insert(out, { file = file, kind = "decl", y = child.sel_y, x = child.sel_x, yend = child.sel_yend, xend = child.sel_xend })
          local d = child.declaration
+
+
+         local kind = d and "impl" or "decl"
+         table.insert(out, { file = file, kind = kind, y = child.sel_y, x = child.sel_x, yend = child.sel_yend, xend = child.sel_xend })
          if d then
             table.insert(out, { file = file, kind = "decl", y = d.sel_y, x = d.sel_x, yend = d.sel_yend, xend = d.sel_xend })
          end
