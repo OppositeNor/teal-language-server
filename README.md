@@ -1,3 +1,9 @@
+This is a repo forked from [https://github.com/teal-language/teal-language-server]. I'm been playing around with Teal recently with Neovim, but the language server lacks some functionalities that I would like, so I made this fork and added stuffs inside.
+
+I personally have no idea how a language server work, and all I want is just get some tools and environments ready for my development. So for this LSP I basically vibed for the things that I need. If this helps you somehow when you also just want to get something working maybe you could try using this repo. If you are one of the developers from the original repo, or you would like to contribute for it, maybe you could look at what this repo has, and potentially inspire you and merge some features from this to the main repo.
+
+The rest is the repo's original README:
+
 [![Test all the OS/Platforms](https://github.com/teal-language/teal-language-server/actions/workflows/platform-test.yaml/badge.svg?branch=main)](https://github.com/teal-language/teal-language-server/actions/workflows/platform-test.yaml)
 
 # Teal Language Server
