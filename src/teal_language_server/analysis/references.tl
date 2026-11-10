@@ -391,6 +391,46 @@ local function location_kind(parents: {AstNode:AstNode}, node: AstNode, decl_y: 
    return "read"
 end
 
+-- Parameter declarations and uses, resolved by declaration identity. Reuse
+-- the reference lookup rules, including shadowing in local initializers.
+function references.parameter_locations(view: View): {Location}
+   local out: {Location} = {}
+   if view.ast == nil then return out end
+   local index = index_of(view)
+   local parameters: {integer:{integer:boolean}} = {}
+   for _, row in pairs(index.names_by_line) do
+      for _, node in ipairs(row) do
+         if node.kind == "argument" and node.tk ~= "..." then
+            parameters[node.y] = parameters[node.y] or {}
+            parameters[node.y][node.x] = true
+         end
+      end
+   end
+   for _, row in pairs(index.names_by_line) do
+      for _, node in ipairs(row) do
+         if (node.kind == "argument" or node.kind == "variable") and node.tk:match("^[%a_][%w_]*$") then
+            local ly, lx = lookup_position(view, index.parents, node)
+            local dy, dx = view.declaration_of(node.tk, ly, lx)
+            local declaration = node.kind == "argument"
+            if declaration or (dy and parameters[dy] and parameters[dy][dx]) then
+               -- Implicit `self` and parser recovery can create synthetic nodes.
+               local tok = ast_walk.token_at(view.tokens, node.y, node.x)
+               if tok and tok.tk == node.tk then
+                  table.insert(out, {
+                     file = view.path, kind = (declaration and "decl" or "read") as references.LocationKind,
+                     y = node.y, x = node.x, yend = node.y, xend = node.x + #node.tk,
+                  })
+               end
+            end
+         end
+      end
+   end
+   table.sort(out, function(a: Location, b: Location): boolean
+      return a.y < b.y or (a.y == b.y and a.x < b.x)
+   end)
+   return out
+end
+
 local function collect_names(view: View, target: Target, out: {Location})
    local parents = parents_of(view)
    ast_walk.walk(view.ast, {

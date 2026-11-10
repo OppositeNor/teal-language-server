@@ -716,7 +716,28 @@ function LanguageFeatureHandlers:_on_completion_resolve(params, id)
    self._lsp_reader_writer:send_rpc(id, item)
 end
 
+function LanguageFeatureHandlers:_on_semantic_tokens(params, id)
+   local doc = handler_helper.get_document(self._document_manager, params)
+   local data = {}
+   if doc then
+      local previous_line, previous_start = 0, 0
+      for _, loc in ipairs(references.parameter_locations(handler_helper.view(doc, true))) do
+         local range = doc:to_lsp_range(loc.y, loc.x, loc.yend, loc.xend)
+         local line, start = range.start.line, range.start.character
+         table.insert(data, line - previous_line)
+         table.insert(data, line == previous_line and start - previous_start or start)
+         table.insert(data, range["end"].character - start)
+         table.insert(data, 0)
+         table.insert(data, 0)
+         previous_line, previous_start = line, start
+      end
+   end
+   setmetatable(data, json.empty_array_mt)
+   self._lsp_reader_writer:send_rpc(id, { data = data })
+end
+
 function LanguageFeatureHandlers:initialize()
+   self._lsp_events_manager:set_handler("textDocument/semanticTokens/full", function(params, id) self:_on_semantic_tokens(params, id) end)
    self._lsp_events_manager:set_handler("completionItem/resolve", function(params, id) self:_on_completion_resolve(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/completion", function(params, id) self:_on_completion(params, id) end)
    self._lsp_events_manager:set_handler("textDocument/signatureHelp", function(params, id) self:_on_signature_help(params, id) end)

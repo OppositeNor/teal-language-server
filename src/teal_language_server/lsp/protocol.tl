@@ -111,6 +111,7 @@ local record lsp
          "workspace/symbol"
          "teal/serverStats"
          "textDocument/inlayHint"
+         "textDocument/semanticTokens/full"
          "window/showMessage"
          "shutdown"
       end

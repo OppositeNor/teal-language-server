@@ -190,6 +190,7 @@ local lsp = { Message = { ResponseError = {} }, Position = {}, Range = {}, Locat
 
 
 
+
 lsp.error_code = {
    InternalError = -32603,
    InvalidParams = -32602,

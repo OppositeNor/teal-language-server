@@ -22,6 +22,7 @@ A language server for the [Teal language](https://github.com/teal-language/tl)
 * Code actions (`textDocument/codeAction`): quick fixes (remove unused import, prefix unused variable with `_`, annotate an implicit `any`, disable a rule for a line) and "Fix all" (`source.fixAll.teal`)
 * Document outline (`textDocument/documentSymbol`) and workspace symbol search (`workspace/symbol`)
 * Inlay hints (`textDocument/inlayHint`) showing inferred types of unannotated locals
+* Semantic highlighting (`textDocument/semanticTokens/full`) for parameter declarations and references, including captured parameters in nested functions
 * Unsaved edits to a module are visible to the files that `require` it
 
 ## Installation

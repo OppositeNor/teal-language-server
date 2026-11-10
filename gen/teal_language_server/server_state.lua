@@ -10,6 +10,7 @@ local logging = require("teal_language_server.logging")
 local class = require("teal_language_server.util.class")
 local rule_registry = require("teal_language_server.analysis.diagnostics.rule_registry")
 local workspace_index = require("teal_language_server.analysis.workspace_index")
+local json = require("cjson")
 
 local logger = logging.get_logger(_module_name)
 
@@ -89,6 +90,13 @@ local capabilities = {
    documentHighlightProvider = true,
    workspaceSymbolProvider = true,
    inlayHintProvider = true,
+   semanticTokensProvider = {
+      legend = {
+         tokenTypes = { "parameter" },
+         tokenModifiers = setmetatable({}, json.empty_array_mt),
+      },
+      full = true,
+   },
    renameProvider = {
       prepareProvider = true,
    },
